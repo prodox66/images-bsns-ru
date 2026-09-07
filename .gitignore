@@ -1,0 +1,8 @@
+node_modules/
+test-results/
+playwright-report/
+*.log
+
+# Real and generated content is deployed independently through FTP.
+images/*
+!images/.gitkeep

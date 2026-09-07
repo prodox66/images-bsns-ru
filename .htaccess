@@ -1,0 +1,13 @@
+Options -Indexes
+
+<IfModule mod_headers.c>
+    Header always set Access-Control-Allow-Origin "*"
+    Header always set Cross-Origin-Resource-Policy "cross-origin"
+    Header always set X-Content-Type-Options "nosniff"
+</IfModule>
+
+<IfModule mod_mime.c>
+    AddType image/avif .avif
+    AddType image/webp .webp
+    AddType application/javascript .js
+</IfModule>
