@@ -65,8 +65,8 @@ function browserConfiguration() {
     });
     return Object.freeze({
         siteRootUrl: SITE_URL, interfaceRootUrl: INTERFACE_URL,
-        library: Object.freeze({ id: 'images', callerId: 'imageLibrary', contentType: 'Images', defaultTab: 'Images', pageSize: EXPECTED_PAGE_COUNTS[0] }),
-        globals: Object.freeze({ files: 'BZNLibraryImageFiles', resourceLibrary: 'BZNResourceLibrary', libraryRuntimeConfig: 'BZNLibraryRuntimeConfig' }),
+        library: Object.freeze({ id: 'images', callerId: 'imageLibrary', contentType: 'Images', defaultTab: 'Images' }),
+        globals: Object.freeze({ files: 'BZNLibraryImageFiles', resourceLibrary: 'BZNResourceLibrary', libraryRuntimeConfig: 'BZNLibraryRuntimeConfig', libraryWindow: 'BZNNewUILibraryWindow' }),
         data: Object.freeze({ indexWidth: 3, scriptExtension: '.js', previewKind: 'image', defaultMime: 'application/octet-stream' }),
         mimeByExtension: Object.freeze({ svg: 'image/svg+xml' }), labels: Object.freeze({ title: 'Библиотека изображений', use: 'Использовать' }),
         status: Object.freeze({ loading: 'Загрузка…', ready: 'Готово: {count} изображений.', error: 'Ошибка' }),
@@ -92,6 +92,8 @@ try {
         await page.locator('#openImageLibrary:not([disabled])').click();
         const modal = page.locator('.bzn-resource-library-modal:not([hidden])');
         await modal.waitFor();
+        const previewBackground = await modal.locator('.bzn-resource-library-preview').first().evaluate((element) => getComputedStyle(element).backgroundImage);
+        assert.match(previewBackground, /linear-gradient/, `cycle ${cycle}: image transparency checker`);
         const counts = [];
         for (let pageIndex = 0; pageIndex < EXPECTED_PAGE_COUNTS.length; pageIndex += 1) {
             // Loop: both pages keep one fixed window and expose the exact 30/4 split.
@@ -107,6 +109,8 @@ try {
         const lightbox = page.locator('.bzn-lightbox:not([hidden])');
         await lightbox.waitFor();
         assert.equal(await lightbox.getAttribute('data-lightbox-content-type'), 'Images');
+        const lightboxBackground = await lightbox.locator('.bzn-lightbox-stage').evaluate((element) => getComputedStyle(element).backgroundImage);
+        assert.match(lightboxBackground, /linear-gradient/, `cycle ${cycle}: Lightbox transparency checker`);
         assert.deepEqual(errors, []);
         await context.close();
         console.log(`Images browser cycle ${cycle}/${CLEAN_CYCLES} passed.`);

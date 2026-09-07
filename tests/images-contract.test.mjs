@@ -59,7 +59,9 @@ const [runtimeSource, gallerySource, ignoreSource] = await Promise.all([
     readFile(path.join(REPOSITORY_ROOT, 'image-gallery.js'), TEXT_ENCODING),
     readFile(path.join(REPOSITORY_ROOT, '.gitignore'), TEXT_ENCODING),
 ]);
-assert.match(runtimeSource, /defaultTab: 'Images', pageSize: 30/);
+assert.match(runtimeSource, /defaultTab: 'Images'/);
+assert.doesNotMatch(runtimeSource, /pageSize:\s*30/, 'site config must inherit common gallery geometry');
+assert.match(gallerySource, /configuration\.globals\.libraryWindow\]\.pageSize\(\)/, 'missing provider context must resolve the shared primitive page size');
 assert.match(runtimeSource, /https:\/\/library-ui\.bsns\.ru\//);
 assert.match(runtimeSource, /content: Object\.freeze\(\{ directory: 'images\/', index: 'files\.js', dataDirectory: 'data\/'/);
 assert.match(gallerySource, /class ImageLibrarySite/);

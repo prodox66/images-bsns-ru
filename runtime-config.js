@@ -6,9 +6,9 @@
     const SITE_SETTINGS = Object.freeze({
         siteRootUrl: new URL('./', document.baseURI).href,
         interfaceRootUrl: 'https://library-ui.bsns.ru/',
-        library: Object.freeze({ id: 'images', callerId: 'imageLibrary', contentType: 'Images', defaultTab: 'Images', pageSize: 30 }),
+        library: Object.freeze({ id: 'images', callerId: 'imageLibrary', contentType: 'Images', defaultTab: 'Images' }),
         content: Object.freeze({ directory: 'images/', index: 'files.js', dataDirectory: 'data/' }),
-        globals: Object.freeze({ files: 'BZNLibraryImageFiles', resourceLibrary: 'BZNResourceLibrary', libraryRuntimeConfig: 'BZNLibraryRuntimeConfig' }),
+        globals: Object.freeze({ files: 'BZNLibraryImageFiles', resourceLibrary: 'BZNResourceLibrary', libraryRuntimeConfig: 'BZNLibraryRuntimeConfig', libraryWindow: 'BZNNewUILibraryWindow' }),
         data: Object.freeze({ indexWidth: 3, scriptExtension: '.js', previewKind: 'image', defaultMime: 'application/octet-stream' }),
         mimeByExtension: Object.freeze({ avif: 'image/avif', gif: 'image/gif', jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', svg: 'image/svg+xml', webp: 'image/webp' }),
         labels: Object.freeze({ title: 'Библиотека изображений', use: 'Использовать' }),
