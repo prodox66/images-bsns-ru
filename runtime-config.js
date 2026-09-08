@@ -12,7 +12,12 @@
         data: Object.freeze({ indexWidth: 3, scriptExtension: '.js', previewKind: 'image', defaultMime: 'application/octet-stream' }),
         mimeByExtension: Object.freeze({ avif: 'image/avif', gif: 'image/gif', jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', svg: 'image/svg+xml', webp: 'image/webp' }),
         labels: Object.freeze({ title: 'Библиотека изображений', use: 'Использовать' }),
-        status: Object.freeze({ loading: 'Загрузка интерфейса…', ready: 'Готово: {count} изображений.', error: 'Не удалось загрузить индекс или интерфейс библиотеки.' }),
+        status: Object.freeze({
+            loading: 'Загрузка интерфейса…',
+            ready: 'Готово: {count} изображений.',
+            empty: 'Индекс изображений пока не создан. Загрузите файлы и выполните генератор.',
+            error: 'Не удалось загрузить интерфейс библиотеки.',
+        }),
         interfacePaths: Object.freeze({
             resourceLibraryScript: 'assets/resource-library-v2.js',
             resourceLibraryStylesheet: 'assets/resource-library.css',

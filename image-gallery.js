@@ -10,6 +10,8 @@
         constructor(configuration) {
             this.configuration = configuration;
             this.files = Object.freeze([]);
+            this.indexReady = false;
+            this.indexPromise = null;
             this.openButton = document.getElementById(OPEN_BUTTON_ID);
             this.statusNode = document.getElementById(STATUS_ID);
         }
@@ -40,6 +42,39 @@
             });
         }
 
+        // Function: one retryable loader owns the generated FTP index without blocking the shared interface.
+        loadImageIndex() {
+            if (this.indexReady) return Promise.resolve(this.files);
+            if (this.indexPromise) return this.indexPromise;
+            this.indexPromise = this.loadScript(this.configuration.imageIndexUrl)
+                .then(() => {
+                    const indexedFiles = window[this.configuration.globals.files];
+                    if (!Array.isArray(indexedFiles)) throw new Error(this.configuration.status.empty);
+                    this.files = Object.freeze(indexedFiles.map((name) => String(name)));
+                    this.indexReady = true;
+                    return this.files;
+                })
+                .catch((error) => {
+                    // Branch: Refresh must be able to retry after files.js appears on the static content host.
+                    this.indexPromise = null;
+                    throw error;
+                });
+            return this.indexPromise;
+        }
+
+        // Function: missing content becomes an empty compatible provider response, not a disabled application.
+        async ensureImageIndex() {
+            try {
+                await this.loadImageIndex();
+                this.statusNode.textContent = this.configuration.status.ready.replace('{count}', String(this.files.length));
+                return true;
+            } catch (error) {
+                this.files = Object.freeze([]);
+                this.statusNode.textContent = this.configuration.status.empty;
+                return false;
+            }
+        }
+
         // Function: every indexed file becomes a generic immutable record.
         item(name, index) {
             const extension = String(name.split('.').pop() || '').toLowerCase();
@@ -58,6 +93,7 @@
 
         // Function: the fixed page is a deterministic slice of the generated FTP-content index.
         async providePage(context = {}) {
+            await this.ensureImageIndex();
             const requestedPageSize = Number(context.pageSize);
             const pageSize = requestedPageSize > 0 ? requestedPageSize : await window[this.configuration.globals.libraryWindow].pageSize();
             const pageCount = Math.max(1, Math.ceil(this.files.length / pageSize));
@@ -85,18 +121,16 @@
             });
         }
 
-        // Function: initialization loads index, Lightbox and gallery sequentially and exposes one visible outcome.
+        // Function: initialization makes the shared Window and Lightbox usable even before FTP content is indexed.
         async initialize() {
             try {
                 this.statusNode.textContent = this.configuration.status.loading;
                 this.installLibraryRuntimeConfig();
-                await this.loadScript(this.configuration.imageIndexUrl);
-                this.files = Object.freeze(Array.from(window[this.configuration.globals.files] || {}, (name) => String(name)));
                 await this.loadScript(this.configuration.interface.lightboxScript);
                 await this.loadScript(this.configuration.interface.resourceLibraryScript);
                 this.openButton.disabled = false;
                 this.openButton.addEventListener('click', () => void this.open());
-                this.statusNode.textContent = this.configuration.status.ready.replace('{count}', String(this.files.length));
+                await this.ensureImageIndex();
             } catch (error) {
                 this.statusNode.textContent = this.configuration.status.error;
                 throw error;
