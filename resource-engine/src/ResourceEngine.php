@@ -377,10 +377,7 @@ final class ResourceEngine
         if ((int) $upload['size'] < 1 || (int) $upload['size'] > $this->configuration->maximumUploadBytes()) {
             throw new RuntimeException('Upload size is outside the configured limit.');
         }
-        $name = trim(basename((string) $upload['name']));
-        if ($name === '' || preg_match('/[\x00-\x1F\x7F\\\/]/u', $name) || !$collection->supportsName($name)) {
-            throw new RuntimeException('Unsupported upload filename.');
-        }
+        $name = $collection->validatedUploadName((string) $upload['name']);
         $temporaryFile = (string) $upload['tmp_name'];
         $expectedMime = $collection->mimeForName($name);
         $actualMime = (new \finfo(FILEINFO_MIME_TYPE))->file($temporaryFile);

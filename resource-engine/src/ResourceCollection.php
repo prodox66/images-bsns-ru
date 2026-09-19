@@ -73,6 +73,24 @@ final class ResourceCollection
         return $this->mimeForName($name) !== null;
     }
 
+    /** Validates one browser filename before it can become a collection-owned source. */
+    public function validatedUploadName(string $candidate): string
+    {
+        $name = trim($candidate);
+        $controlCharacterState = preg_match('/[\x00-\x1F\x7F]/u', $name);
+        $containsPathSeparator = str_contains($name, '/') || str_contains($name, '\\');
+        if (
+            $name === ''
+            || $controlCharacterState !== 0
+            || $containsPathSeparator
+            || basename($name) !== $name
+            || !$this->supportsName($name)
+        ) {
+            throw new InvalidArgumentException('Unsupported upload filename.');
+        }
+        return $name;
+    }
+
     /** Produces a stable id without exposing a filename or storage path to callers. */
     public function resourceId(string $name): string
     {

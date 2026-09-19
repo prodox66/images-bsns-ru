@@ -6,6 +6,7 @@
     const DEFAULT_PAGE = 1;
     const DEFAULT_PAGE_SIZE = 30;
     const EMPTY_TEXT = '';
+    const RESPONSE_PREVIEW_LIMIT = 240;
     const RESOURCE_EDITOR_TYPES = Object.freeze({
         PICTURES: 'pictures',
         IMAGES: 'images',
@@ -383,10 +384,42 @@
 
         /** Reads one API response under the current standalone or cabinet session. */
         async fetchJson(url, options) {
-            const response = await fetch(url, Object.assign({ credentials: 'include' }, options || {}));
-            const payload = await response.json().catch(() => ({ ok: false, error: TEXT.requestFailed }));
-            if (!response.ok || payload.ok === false) throw new Error(payload.error || TEXT.requestFailed);
+            const requestOptions = options || {};
+            const action = this.requestAction(url, requestOptions);
+            const response = await fetch(url, Object.assign({ credentials: 'include' }, requestOptions));
+            const responseText = await response.text();
+            let payload;
+            try {
+                payload = JSON.parse(responseText);
+            } catch (error) {
+                const contentType = response.headers.get('content-type') || 'unknown';
+                const preview = this.responsePreview(responseText);
+                const suffix = preview ? ' Ответ: ' + preview : EMPTY_TEXT;
+                throw new Error('Некорректный ответ сервера [action=' + action + '; HTTP ' + response.status + '; ' + contentType + '].' + suffix);
+            }
+            if (!response.ok || payload.ok === false) {
+                const diagnostic = payload.diagnostic ? '; diagnostic=' + payload.diagnostic : EMPTY_TEXT;
+                throw new Error((payload.error || TEXT.requestFailed) + ' [action=' + action + '; HTTP ' + response.status + diagnostic + ']');
+            }
             return payload;
+        }
+
+        /** Resolves a semantic action name without exposing request credentials. */
+        requestAction(url, options) {
+            const targetUrl = new URL(url, globalScope.location.href);
+            const formAction = options.body && typeof options.body.get === 'function'
+                ? options.body.get('action')
+                : EMPTY_TEXT;
+            return String(formAction || targetUrl.searchParams.get('action') || 'unknown');
+        }
+
+        /** Produces a bounded plain-text preview when a proxy corrupts the JSON contract. */
+        responsePreview(source) {
+            return String(source || EMPTY_TEXT)
+                .replace(/<[^>]*>/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, RESPONSE_PREVIEW_LIMIT);
         }
 
         /** Creates one native control inside this isolated remote tool. */

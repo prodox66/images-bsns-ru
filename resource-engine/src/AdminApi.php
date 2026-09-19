@@ -30,6 +30,14 @@ final class AdminApi
     /** Executes a bounded action from the reusable administration widget. */
     public function run(): never
     {
+        // Completed boundary: PHP warnings become JSON failures instead of corrupting the response body.
+        set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
+            if ((error_reporting() & $severity) === 0) {
+                return false;
+            }
+            throw new \ErrorException($message, 0, $severity, $file, $line);
+        });
+
         $allowedOrigin = $this->engine->configuration()->adminCorsOrigin();
         $this->responder->applyCors($allowedOrigin, true);
         $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
@@ -63,8 +71,29 @@ final class AdminApi
         } catch (RuntimeException $error) {
             $this->responder->json(['ok' => false, 'error' => $error->getMessage()], 422);
         } catch (Throwable $error) {
-            $this->responder->json(['ok' => false, 'error' => 'Administration operation failed.'], 500);
+            $this->internalFailure($error);
         }
+    }
+
+    /** Logs private failure details and returns a safe diagnostic id to the administrator. */
+    private function internalFailure(Throwable $error): never
+    {
+        $diagnosticLength = 12;
+        $diagnosticId = substr(hash('sha256', microtime(true) . ':' . random_bytes(16)), 0, $diagnosticLength);
+        $logMessage = sprintf(
+            '[BZN_RESOURCE_ADMIN:%s] %s: %s in %s:%d',
+            $diagnosticId,
+            $error::class,
+            $error->getMessage(),
+            $error->getFile(),
+            $error->getLine()
+        );
+        error_log($logMessage);
+        $this->responder->json([
+            'ok' => false,
+            'error' => 'Administration operation failed.',
+            'diagnostic' => $diagnosticId,
+        ], 500);
     }
 
     /** Returns only information required to bootstrap the standalone or embedded widget. */

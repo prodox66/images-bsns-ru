@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 use Bzn\ResourceEngine\EngineConfiguration;
 use Bzn\ResourceEngine\ImageProcessor;
+use Bzn\ResourceEngine\ResourceCollection;
 use Bzn\ResourceEngine\ResourceEngine;
 
 require_once __DIR__ . '/../src/ResourceCollection.php';
@@ -22,6 +23,17 @@ function assertContract(bool $condition, string $message): void
     if (!$condition) {
         throw new RuntimeException($message);
     }
+}
+
+/** Confirms that unsafe upload names are rejected without emitting PHP warnings. */
+function assertInvalidUploadName(ResourceCollection $collection, string $name): void
+{
+    try {
+        $collection->validatedUploadName($name);
+    } catch (InvalidArgumentException $error) {
+        return;
+    }
+    throw new RuntimeException('Unsafe upload filename must be rejected: ' . json_encode($name));
 }
 
 /** Removes only the unique test root created below. */
@@ -73,7 +85,14 @@ try {
             ],
         ],
     ];
-    $engine = new ResourceEngine(new EngineConfiguration($settings), new ImageProcessor());
+    $configuration = new EngineConfiguration($settings);
+    $collection = $configuration->collection('images');
+    assertContract($collection->validatedUploadName('valid-name.png') === 'valid-name.png', 'Valid upload filename must remain unchanged.');
+    assertInvalidUploadName($collection, '../unsafe.png');
+    assertInvalidUploadName($collection, 'unsafe\\name.png');
+    assertInvalidUploadName($collection, "unsafe\0name.png");
+
+    $engine = new ResourceEngine($configuration, new ImageProcessor());
 
     $catalog = $engine->rebuild('images');
     assertContract($catalog['total'] === 1, 'Catalog must contain the physical fixture.');
