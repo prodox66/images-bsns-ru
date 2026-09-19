@@ -230,19 +230,22 @@ final class ResourceEngine
         return $this->withLock($collection, function () use ($collection, $variant): array {
             $catalog = $this->readJson($collection->catalogFile());
             $limit = $this->configuration->operationBatchSize();
+            $deadline = microtime(true) + $this->configuration->operationTimeBudgetSeconds();
+            $attempted = 0;
             $processed = [];
             $errors = [];
             foreach ((array) ($catalog['resources'] ?? []) as $record) {
-                // Loop: the batch stops at its declared ceiling to avoid a long accidental conversion request.
-                if (count($processed) >= $limit) {
-                    break;
-                }
                 $resourceId = (string) $record['id'];
                 $sourceFile = $this->sourceFile($collection, (string) $record['name']);
                 $derivedFile = $collection->derivedPath($resourceId, $variant === 'thumbnail' ? 'thumbnail' : 'optimized');
                 if ($this->imageProcessor->isCurrent($sourceFile, $derivedFile)) {
                     continue;
                 }
+                // Branch: attempts, not only successes, are bounded so unsupported files cannot extend the request.
+                if ($attempted >= $limit || microtime(true) >= $deadline) {
+                    break;
+                }
+                $attempted++;
                 try {
                     if ($variant === 'thumbnail') {
                         $this->imageProcessor->thumbnail($collection, $sourceFile, $resourceId);
@@ -255,7 +258,18 @@ final class ResourceEngine
                 }
             }
             $rebuilt = $this->rebuildUnlocked($collection);
-            return ['processed' => $processed, 'errors' => $errors, 'catalog' => $rebuilt];
+            $stateField = $variant === 'thumbnail' ? 'has_thumbnail' : 'has_optimized';
+            $remaining = count(array_filter(
+                (array) ($rebuilt['resources'] ?? []),
+                static fn (array $record): bool => ($record[$stateField] ?? false) !== true
+            ));
+            return [
+                'attempted' => $attempted,
+                'processed' => $processed,
+                'errors' => $errors,
+                'remaining' => $remaining,
+                'catalog' => $rebuilt,
+            ];
         });
     }
 

@@ -25,6 +25,17 @@ function assertContract(bool $condition, string $message): void
     }
 }
 
+/** Creates one tiny isolated PNG without depending on repository fixtures. */
+function createTestImage(string $file, int $red, int $green, int $blue): void
+{
+    $image = imagecreatetruecolor(24, 12);
+    assertContract($image !== false, 'Unable to allocate test image.');
+    $color = imagecolorallocate($image, $red, $green, $blue);
+    imagefill($image, 0, 0, $color);
+    assertContract(imagepng($image, $file), 'Unable to save test image.');
+    imagedestroy($image);
+}
+
 /** Confirms that unsafe upload names are rejected without emitting PHP warnings. */
 function assertInvalidUploadName(ResourceCollection $collection, string $name): void
 {
@@ -60,18 +71,14 @@ function removeTestTree(string $directory, string $allowedPrefix): void
 try {
     assertContract(mkdir($sourceDirectory, 0755, true), 'Unable to create test source directory.');
     assertContract(function_exists('imagecreatetruecolor'), 'GD is required for the resource-engine test.');
-    $fixture = imagecreatetruecolor(24, 12);
-    assertContract($fixture !== false, 'Unable to allocate test image.');
-    $color = imagecolorallocate($fixture, 40, 120, 200);
-    imagefill($fixture, 0, 0, $color);
-    assertContract(imagepng($fixture, $sourceFile), 'Unable to save test image.');
-    imagedestroy($fixture);
+    createTestImage($sourceFile, 40, 120, 200);
 
     $settings = [
         'runtime_directory' => $runtimeDirectory,
         'default_page_size' => 30,
         'maximum_page_size' => 100,
-        'operation_batch_size' => 20,
+        'operation_batch_size' => 2,
+        'operation_time_budget_seconds' => 5,
         'maximum_upload_files' => 10,
         'maximum_upload_bytes' => 1024 * 1024,
         'collections' => [
@@ -118,6 +125,18 @@ try {
     assertContract($deleted['deleted'] === 'fixture.png', 'Deletion must report the catalog-owned filename.');
     assertContract(!is_file($sourceFile), 'Deleted test source must leave the collection.');
     assertContract($engine->list('images')['total'] === 0, 'Catalog must be rebuilt after deletion.');
+
+    // Operation: a batch may attempt only its configured slice and reports remaining work explicitly.
+    foreach (['batch-a.png', 'batch-b.png', 'batch-c.png'] as $index => $batchName) {
+        createTestImage($sourceDirectory . DIRECTORY_SEPARATOR . $batchName, 40 + $index, 100, 180);
+    }
+    $engine->rebuild('images');
+    $firstBatch = $engine->optimizeBatch('images');
+    assertContract($firstBatch['attempted'] === 2, 'First batch must respect its attempt limit.');
+    assertContract(count($firstBatch['processed']) === 2, 'First batch must process only its bounded slice.');
+    assertContract($firstBatch['remaining'] === 1, 'First batch must report one remaining derivative.');
+    $secondBatch = $engine->optimizeBatch('images');
+    assertContract(count($secondBatch['processed']) === 1 && $secondBatch['remaining'] === 0, 'Second batch must finish the remaining derivative.');
 
     echo "Resource engine contract: OK\n";
 } finally {

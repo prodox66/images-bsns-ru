@@ -164,11 +164,11 @@ final class AdminApi
         }
         if ($action === 'thumbnails') {
             $result = $this->engine->buildThumbnailBatch($type);
-            $this->responder->json(['ok' => true, 'processed' => count($result['processed']), 'errors' => $result['errors']]);
+            $this->responder->json($this->batchResponse($result));
         }
         if ($action === 'optimize_batch') {
             $result = $this->engine->optimizeBatch($type);
-            $this->responder->json(['ok' => true, 'processed' => count($result['processed']), 'errors' => $result['errors']]);
+            $this->responder->json($this->batchResponse($result));
         }
         if ($action === 'optimize') {
             $result = $this->engine->optimize($type, $this->resourceId());
@@ -179,6 +179,18 @@ final class AdminApi
             ]);
         }
         throw new InvalidArgumentException('Unknown administration action.');
+    }
+
+    /** Normalizes every bounded maintenance result for the same progress UI. */
+    private function batchResponse(array $result): array
+    {
+        return [
+            'ok' => true,
+            'attempted' => (int) ($result['attempted'] ?? 0),
+            'processed' => count((array) ($result['processed'] ?? [])),
+            'errors' => (array) ($result['errors'] ?? []),
+            'remaining' => (int) ($result['remaining'] ?? 0),
+        ];
     }
 
     /** Reads a logical collection id from one request array. */

@@ -23,6 +23,12 @@ assert.match(ADMIN_SOURCE, /perform\('tags'/);
 assert.match(ADMIN_SOURCE, /perform\('thumbnails'/);
 assert.match(ADMIN_SOURCE, /perform\('optimize_batch'/);
 assert.match(ADMIN_SOURCE, /perform\('rebuild'/);
+assert.match(ADMIN_SOURCE, /if \(this\.busy\) return null/);
+assert.match(ADMIN_SOURCE, /captureBusyControls\(\)/);
+assert.match(ADMIN_SOURCE, /response\.remaining/);
+assert.match(ADMIN_SOURCE, /item\.has_optimized === true/);
+assert.match(CONFIG_SOURCE, /'operation_batch_size'\s*=>\s*3/);
+assert.match(CONFIG_SOURCE, /'operation_time_budget_seconds'\s*=>\s*8/);
 
 // Contract: failed HTTP contracts identify the action/status while PHP warnings stay inside JSON.
 assert.match(ADMIN_SOURCE, /response\.text\(\)/);

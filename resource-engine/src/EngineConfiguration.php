@@ -44,7 +44,8 @@ final class EngineConfiguration
     public function catalogGlobalKey(): string { return (string) ($this->settings['catalog_global_key'] ?? 'BZNResourceCatalog'); }
     public function defaultPageSize(): int { return max(1, (int) ($this->settings['default_page_size'] ?? 30)); }
     public function maximumPageSize(): int { return max($this->defaultPageSize(), (int) ($this->settings['maximum_page_size'] ?? 100)); }
-    public function operationBatchSize(): int { return max(1, (int) ($this->settings['operation_batch_size'] ?? 20)); }
+    public function operationBatchSize(): int { return max(1, (int) ($this->settings['operation_batch_size'] ?? 3)); }
+    public function operationTimeBudgetSeconds(): int { return max(1, (int) ($this->settings['operation_time_budget_seconds'] ?? 8)); }
     public function maximumUploadFiles(): int { return max(1, (int) ($this->settings['maximum_upload_files'] ?? 50)); }
     public function maximumUploadBytes(): int { return max(1, (int) ($this->settings['maximum_upload_bytes'] ?? 20971520)); }
     public function corsOrigin(): string { return (string) ($this->settings['cors_origin'] ?? '*'); }

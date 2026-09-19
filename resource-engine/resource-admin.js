@@ -35,6 +35,8 @@
         thumbnails: 'Создать эскизы',
         optimizeBatch: 'Конвертировать в WebP',
         optimizeOne: 'WebP',
+        optimized: 'WebP готов',
+        vector: 'SVG',
         saveTags: 'Сохранить теги',
         remove: 'Удалить',
         previous: 'Назад',
@@ -78,6 +80,8 @@
             this.collections = [];
             this.root = null;
             this.panel = null;
+            this.busy = false;
+            this.busyControlStates = [];
             this.available = true;
             this.type = this.collection;
         }
@@ -300,11 +304,15 @@
                 tags.placeholder = TEXT.tags;
                 const actions = document.createElement('div');
                 actions.className = 'bzn-resource-admin__card-actions';
+                const vectorResource = item.mime === 'image/svg+xml';
+                const optimized = item.has_optimized === true;
+                const optimizeLabel = vectorResource ? TEXT.vector : (optimized ? TEXT.optimized : TEXT.optimizeOne);
                 actions.append(
                     this.createButton(TEXT.saveTags, {
                         onClick: () => this.perform('tags', this.itemData(item.id, { tags: tags.value })),
                     }),
-                    this.createButton(TEXT.optimizeOne, {
+                    this.createButton(optimizeLabel, {
+                        disabled: vectorResource || optimized,
                         onClick: () => this.perform('optimize', this.itemData(item.id)),
                     }),
                     this.createButton(TEXT.remove, {
@@ -346,6 +354,9 @@
 
         /** Executes one protected operation then refreshes the same collection. */
         async perform(action, formData, reload = true) {
+            if (this.busy) return null;
+            this.busy = true;
+            this.captureBusyControls();
             const data = formData || new FormData();
             data.set('action', action);
             data.set('type', this.collection);
@@ -362,16 +373,43 @@
                     await this.bootstrap();
                     return response;
                 }
-                if (message) {
-                    const processed = Number.isFinite(response.processed) ? ' Обработано: ' + response.processed + '.' : EMPTY_TEXT;
-                    message.textContent = TEXT.ready + processed;
-                }
                 if (reload) await this.loadGallery();
+                const resultMessage = this.role('message');
+                if (resultMessage) {
+                    const processed = Number.isFinite(response.processed) ? ' Обработано: ' + response.processed + '.' : EMPTY_TEXT;
+                    const remaining = Number.isFinite(response.remaining) ? ' Осталось: ' + response.remaining + '.' : EMPTY_TEXT;
+                    const errors = response.errors && Object.keys(response.errors).length
+                        ? ' Ошибок: ' + Object.keys(response.errors).length + '.'
+                        : EMPTY_TEXT;
+                    resultMessage.textContent = TEXT.ready + processed + remaining + errors;
+                }
                 return response;
             } catch (error) {
                 if (message) message.textContent = error.message;
                 return null;
+            } finally {
+                this.restoreBusyControls();
+                this.busy = false;
             }
+        }
+
+        /** Disables the current control set once so repeated clicks cannot queue conversion jobs. */
+        captureBusyControls() {
+            this.busyControlStates = this.panel
+                ? Array.from(this.panel.querySelectorAll('button, input, select')).map((control) => ({
+                    control,
+                    disabled: control.disabled,
+                }))
+                : [];
+            this.busyControlStates.forEach(({ control }) => { control.disabled = true; });
+            if (this.panel) this.panel.setAttribute('aria-busy', 'true');
+        }
+
+        /** Restores exactly the disabled states that existed before the request. */
+        restoreBusyControls() {
+            this.busyControlStates.forEach(({ control, disabled }) => { control.disabled = disabled; });
+            this.busyControlStates = [];
+            if (this.panel) this.panel.removeAttribute('aria-busy');
         }
 
         /** Creates request data for one opaque resource id. */

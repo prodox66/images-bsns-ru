@@ -64,6 +64,8 @@
 
 `resource-engine/src/ResourceEngine.php::optimize, ResourceEngine::optimizeBatch <- AdminApi optimize/optimize_batch, tests`
 
+`resource-engine/src/EngineConfiguration.php::operationBatchSize, operationTimeBudgetSeconds <- ResourceEngine::buildDerivativeBatch`
+
 `resource-engine/src/ResourceEngine.php::delete <- AdminApi delete, tests`
 
 `resource-engine/src/ImageProcessor.php::thumbnail <- ResourceEngine resource/buildDerivativeBatch`
@@ -76,6 +78,8 @@
 
 `resource-engine/src/AdminApi.php::run <- resource-engine/admin-api.php`
 
+`resource-engine/src/AdminApi.php::batchResponse <- AdminApi::mutate thumbnails/optimize_batch`
+
 `resource-engine/resource-client.js::BZNResourceClient.list, resource, blob <- external UI consumers`
 
 `resource-engine/resource-admin.js::BZNResourceAdmin.mount, open <- standalone admin.php, embedded host, resolved resource editor`
@@ -83,5 +87,7 @@
 `resource-engine/resource-admin.js::BZNResourceAdmin.fetchJson <- status, login, loadGallery, perform`
 
 `resource-engine/resource-admin.js::BZNResourceAdmin.requestAction, responsePreview <- BZNResourceAdmin.fetchJson`
+
+`resource-engine/resource-admin.js::BZNResourceAdmin.captureBusyControls, restoreBusyControls <- BZNResourceAdmin.perform`
 
 `resource-engine/resource-admin.js::resolveResourceEditor <- external BZNResourceEditor.resolve(type); pictures/images/masks/shadows -> common resources constant, unknown -> UNAVAILABLE`
