@@ -6,3 +6,7 @@ playwright-report/
 # Real and generated content is deployed independently through FTP.
 images/*
 !images/.gitkeep
+
+# Resource Engine runtime state, server paths and authentication stay outside Git.
+resource-engine/config.local.php
+resource-engine/runtime/

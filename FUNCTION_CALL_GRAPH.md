@@ -45,3 +45,37 @@
 `tools/reindex-on-trigger.js::ImageLibraryTrigger.run <- direct CRON CLI, tests`
 
 `tools/build-image-library-legacy.js::LegacyImageLibraryBuilder.build <- ImageLibraryTrigger.run`
+
+## Resource Engine v2
+
+`resource-engine/src/ResourceEngine.php::rebuild <- PublicApi list first run, AdminApi rebuild/upload/tags/delete/optimize, tests`
+
+`resource-engine/src/ResourceEngine.php::list <- PublicApi list, AdminApi list, tests`
+
+`resource-engine/src/ResourceEngine.php::resource <- PublicApi binary variants, tests`
+
+`resource-engine/src/ResourceEngine.php::setTags <- AdminApi tags, tests`
+
+`resource-engine/src/ResourceEngine.php::upload <- AdminApi upload`
+
+`resource-engine/src/ResourceEngine.php::buildThumbnailBatch <- AdminApi thumbnails`
+
+`resource-engine/src/ResourceEngine.php::optimize, ResourceEngine::optimizeBatch <- AdminApi optimize/optimize_batch, tests`
+
+`resource-engine/src/ResourceEngine.php::delete <- AdminApi delete, tests`
+
+`resource-engine/src/ImageProcessor.php::thumbnail <- ResourceEngine resource/buildDerivativeBatch`
+
+`resource-engine/src/ImageProcessor.php::optimize <- ResourceEngine optimize/buildDerivativeBatch`
+
+`resource-engine/src/AdminAuthenticator.php::authorized <- AdminApi status/protected actions; local session or deployment authorization_callback`
+
+`resource-engine/src/PublicApi.php::run <- resource-engine/api.php`
+
+`resource-engine/src/AdminApi.php::run <- resource-engine/admin-api.php`
+
+`resource-engine/resource-client.js::BZNResourceClient.list, resource, blob <- external UI consumers`
+
+`resource-engine/resource-admin.js::BZNResourceAdmin.mount, open <- standalone admin.php, embedded host, resolved resource editor`
+
+`resource-engine/resource-admin.js::resolveResourceEditor <- external BZNResourceEditor.resolve(type); pictures/images/masks/shadows -> common resources constant, unknown -> UNAVAILABLE`
