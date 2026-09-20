@@ -1,6 +1,6 @@
 Options -Indexes
 
-<FilesMatch "^(config\.local\.php|config\.example\.php|bootstrap\.php)$">
+<FilesMatch "^(config\.local\.php|config\.example\.php|service\.local\.php|service\.config\.example\.php|bootstrap\.php)$">
     Require all denied
 </FilesMatch>
 
