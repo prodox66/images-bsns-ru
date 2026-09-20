@@ -304,7 +304,7 @@ final class ResourceEngine
                 'has_optimized' => $this->imageProcessor->isCurrent($sourceFile, $collection->derivedPath($resourceId, 'optimized')),
             ];
         }
-        usort($resources, static fn (array $left, array $right): int => strnatcasecmp((string) $left['name'], (string) $right['name']));
+        $resources = $this->sortNewestFirst($resources);
 
         $catalog = [
             'version' => 1,
@@ -318,6 +318,23 @@ final class ResourceEngine
             . $this->json($catalog, JSON_PRETTY_PRINT) . ");\n";
         $this->writeText($collection->catalogScriptFile(), $script);
         return $catalog;
+    }
+
+    /** Orders every catalog page by source modification time and keeps equal timestamps deterministic. */
+    private function sortNewestFirst(array $resources): array
+    {
+        usort($resources, static function (array $left, array $right): int {
+            $leftModified = (int) ($left['modified'] ?? 0);
+            $rightModified = (int) ($right['modified'] ?? 0);
+            $modifiedOrder = $rightModified <=> $leftModified;
+            if ($modifiedOrder !== 0) {
+                return $modifiedOrder;
+            }
+
+            // Branch: identical filesystem timestamps retain a stable human-readable order.
+            return strnatcasecmp((string) ($left['name'] ?? ''), (string) ($right['name'] ?? ''));
+        });
+        return $resources;
     }
 
     /** Reads a catalog or creates its first version through the same guarded builder. */

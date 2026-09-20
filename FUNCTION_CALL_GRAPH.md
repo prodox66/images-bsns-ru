@@ -52,6 +52,8 @@
 
 `resource-engine/src/ResourceEngine.php::list <- PublicApi list, AdminApi list, tests`
 
+`resource-engine/src/ResourceEngine.php::sortNewestFirst <- ResourceEngine::rebuildUnlocked`
+
 `resource-engine/src/ResourceEngine.php::resource <- PublicApi binary variants, tests`
 
 `resource-engine/src/ResourceEngine.php::setTags <- AdminApi tags, tests`

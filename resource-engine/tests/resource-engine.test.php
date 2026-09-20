@@ -127,10 +127,18 @@ try {
     assertContract($engine->list('images')['total'] === 0, 'Catalog must be rebuilt after deletion.');
 
     // Operation: a batch may attempt only its configured slice and reports remaining work explicitly.
-    foreach (['batch-a.png', 'batch-b.png', 'batch-c.png'] as $index => $batchName) {
-        createTestImage($sourceDirectory . DIRECTORY_SEPARATOR . $batchName, 40 + $index, 100, 180);
+    $batchNames = ['batch-a.png', 'batch-b.png', 'batch-c.png'];
+    $batchBaseModified = time() - 300;
+    $batchModifiedStep = 60;
+    foreach ($batchNames as $index => $batchName) {
+        $batchFile = $sourceDirectory . DIRECTORY_SEPARATOR . $batchName;
+        createTestImage($batchFile, 40 + $index, 100, 180);
+        assertContract(touch($batchFile, $batchBaseModified + ($index * $batchModifiedStep)), 'Unable to set deterministic test modification time.');
     }
-    $engine->rebuild('images');
+    $batchCatalog = $engine->rebuild('images');
+    $expectedNewestFirst = array_reverse($batchNames);
+    assertContract(array_column($batchCatalog['resources'], 'name') === $expectedNewestFirst, 'Catalog must return newest resources first.');
+    assertContract(array_column($engine->list('images')['items'], 'name') === $expectedNewestFirst, 'Paginated lists must preserve newest-first catalog order.');
     $firstBatch = $engine->optimizeBatch('images');
     assertContract($firstBatch['attempted'] === 2, 'First batch must respect its attempt limit.');
     assertContract(count($firstBatch['processed']) === 2, 'First batch must process only its bounded slice.');
