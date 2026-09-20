@@ -14,7 +14,6 @@ final class ResourceCollection
     private string $runtimeDirectory;
     private array $mimeByExtension;
     private array $defaultTags;
-    private ?string $namePattern;
     private int $thumbnailMaximumWidth;
     private int $thumbnailMaximumHeight;
     private int $thumbnailQuality;
@@ -34,11 +33,6 @@ final class ResourceCollection
         $this->runtimeDirectory = rtrim($runtimeRoot, '/\\') . DIRECTORY_SEPARATOR . $normalizedId;
         $this->mimeByExtension = (array) ($settings['allowed_mime_by_extension'] ?? []);
         $this->defaultTags = $this->normalizeTags((array) ($settings['tags'] ?? []));
-        $configuredNamePattern = trim((string) ($settings['name_pattern'] ?? ''));
-        if ($configuredNamePattern !== '' && @preg_match($configuredNamePattern, '') === false) {
-            throw new InvalidArgumentException('Invalid resource filename pattern.');
-        }
-        $this->namePattern = $configuredNamePattern !== '' ? $configuredNamePattern : null;
 
         $thumbnail = (array) ($settings['thumbnail'] ?? []);
         $optimization = (array) ($settings['optimization'] ?? []);
@@ -76,8 +70,7 @@ final class ResourceCollection
     /** Reports whether a physical source file belongs to this collection. */
     public function supportsName(string $name): bool
     {
-        if ($this->mimeForName($name) === null) return false;
-        return $this->namePattern === null || preg_match($this->namePattern, $name) === 1;
+        return $this->mimeForName($name) !== null;
     }
 
     /** Validates one browser filename before it can become a collection-owned source. */

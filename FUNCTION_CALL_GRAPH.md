@@ -93,23 +93,3 @@
 `resource-engine/resource-admin.js::BZNResourceAdmin.captureBusyControls, restoreBusyControls <- BZNResourceAdmin.perform`
 
 `resource-engine/resource-admin.js::resolveResourceEditor <- external BZNResourceEditor.resolve(type); pictures/images/masks/shadows -> common resources constant, unknown -> UNAVAILABLE`
-
-## Resource Engine service gateway
-
-`resource-engine/service-api.php::HTTP entrypoint <- design.bzn.ru same-origin template gateway [server-to-server HTTP]`
-
-`resource-engine/src/ServiceApi.php::ServiceApi.run <- resource-engine/service-api.php::HTTP entrypoint`
-
-`resource-engine/src/ServiceApi.php::ServiceAuthenticator.authorized <- ServiceApi.run`
-
-`resource-engine/src/ServiceApi.php::ServiceResourceConfiguration.context <- ServiceApi.run, resource-engine/tests/service-api.test.php`
-
-`resource-engine/src/ServiceApi.php::ServiceResourceGateway.list <- ServiceApi.run [kind=list], resource-engine/tests/service-api.test.php`
-
-`resource-engine/src/ServiceApi.php::ServiceResourceGateway.resource <- ServiceApi.run [kind=original|thumbnail], resource-engine/tests/service-api.test.php`
-
-`resource-engine/src/ResourceEngine.php::list, resource <- ServiceResourceGateway`
-
-`resource-engine/src/ResourceCollection.php::supportsName <- ResourceEngine::rebuildUnlocked [optional configured name_pattern limits template collections to *_prj.png]`
-
-`resource-engine/src/HttpResponder.php::resource <- ServiceApi.run [user scope private; demo scope public], PublicApi.run [публичный default]`

@@ -37,16 +37,6 @@ if (editor !== BZNResourceEditor.UNAVAILABLE) await editor.open();
 
 Типы `pictures`, `images`, `masks` и `shadows` сейчас одной константой выбирают общий каталог `resources`. Неизвестный тип возвращает одну константу `BZNResourceEditor.UNAVAILABLE`. Когда появятся разные сценарии, только внутренняя таблица `resolve()` будет заменена маршрутизирующей функцией; вызов интерфейса не изменится.
 
-## Закрытый межсерверный gateway
-
-`service-api.php` использует тот же Resource Engine, но принимает только серверный `X-BZN-Service-Key`. Браузер обращается к same-origin gateway своего приложения; уже этот gateway передаёт логические `type`, `scope`, opaque `owner` и `kind` на ресурсный домен.
-
-- `kind=list` возвращает нормализованный список без physical path и внутреннего collection id.
-- `kind=original` возвращает исходный переносимый файл.
-- `kind=thumbnail` лениво создаёт и возвращает WebP-эскиз.
-- `scope=user` использует только 64-символьный opaque owner; email не принимается.
-- Физические demo/user каталоги, service-key file и политики коллекций находятся только в исключённом из Git `service.local.php`.
-
 Инструмент содержит:
 
 - загрузку изображений;

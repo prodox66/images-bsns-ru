@@ -9,5 +9,4 @@ images/*
 
 # Resource Engine runtime state, server paths and authentication stay outside Git.
 resource-engine/config.local.php
-resource-engine/service.local.php
 resource-engine/runtime/

@@ -41,7 +41,7 @@ final class HttpResponder
     }
 
     /** Streams one resolved file with validators while keeping its physical path private. */
-    public function resource(array $descriptor, string $cacheControl = 'public, max-age=86400, stale-while-revalidate=604800'): never
+    public function resource(array $descriptor): never
     {
         $modified = (int) $descriptor['modified'];
         $bytes = (int) $descriptor['bytes'];
@@ -58,7 +58,7 @@ final class HttpResponder
         header('Content-Type: ' . (string) $descriptor['mime']);
         header('Content-Length: ' . $bytes);
         header('Content-Disposition: inline; filename="' . rawurlencode((string) $descriptor['name']) . '"');
-        header('Cache-Control: ' . $cacheControl);
+        header('Cache-Control: public, max-age=86400, stale-while-revalidate=604800');
         header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $modified) . ' GMT');
         header('ETag: ' . $entityTag);
         readfile((string) $descriptor['path']);
