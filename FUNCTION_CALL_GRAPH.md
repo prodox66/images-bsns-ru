@@ -4,13 +4,23 @@
 
 `image-gallery.js::ImageLibrarySite.installLibraryRuntimeConfig <- ImageLibrarySite.initialize`
 
-`image-gallery.js::ImageLibrarySite.loadScript <- ImageLibrarySite.initialize, ImageLibrarySite.loadImageIndex`
+`image-gallery.js::ImageLibrarySite.loadScript <- ImageLibrarySite.initialize, ImageLibrarySite.loadImageIndex, ImageLibrarySite.ensureResourceClient`
+
+`image-gallery.js::ImageLibrarySite.ensureResourceClient <- ImageLibrarySite.provideResourcePage`
+
+`image-gallery.js::ImageLibrarySite.resourceItem <- ImageLibrarySite.provideResourcePage`
+
+`image-gallery.js::ImageLibrarySite.provideResourcePage <- ImageLibrarySite.providePage, ImageLibrarySite.initialize`
 
 `image-gallery.js::ImageLibrarySite.loadImageIndex <- ImageLibrarySite.ensureImageIndex`
 
-`image-gallery.js::ImageLibrarySite.ensureImageIndex <- ImageLibrarySite.initialize, ImageLibrarySite.providePage`
+`image-gallery.js::ImageLibrarySite.ensureImageIndex <- ImageLibrarySite.initialize, ImageLibrarySite.provideStaticPage`
 
-`image-gallery.js::ImageLibrarySite.item <- ImageLibrarySite.providePage`
+`image-gallery.js::ImageLibrarySite.item <- ImageLibrarySite.provideStaticPage`
+
+`image-gallery.js::ImageLibrarySite.provideStaticPage <- ImageLibrarySite.providePage`
+
+`image-gallery.js::pathExtension <- ImageLibrarySite.resourceItem`
 
 `image-gallery.js::ImageLibrarySite.providePage <- ImageLibrarySite.open, external BZNResourceLibrary provider callback`
 

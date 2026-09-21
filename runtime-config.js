@@ -8,6 +8,7 @@
         interfaceRootUrl: 'https://library-ui.bsns.ru/',
         library: Object.freeze({ id: 'images', callerId: 'imageLibrary', contentType: 'Images', defaultTab: 'Images' }),
         content: Object.freeze({ directory: 'images/', index: 'files.js', dataDirectory: 'data/' }),
+        resourceEngine: Object.freeze({ clientScript: 'resource-engine/resource-client.js', endpoint: 'https://masks.bsns.ru/resource-admin/api.php', type: 'resources' }),
         globals: Object.freeze({ files: 'BZNLibraryImageFiles', resourceLibrary: 'BZNResourceLibrary', libraryRuntimeConfig: 'BZNLibraryRuntimeConfig', libraryWindow: 'BZNNewUILibraryWindow' }),
         data: Object.freeze({ indexWidth: 3, scriptExtension: '.js', previewKind: 'image', defaultMime: 'application/octet-stream' }),
         mimeByExtension: Object.freeze({ avif: 'image/avif', gif: 'image/gif', jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', svg: 'image/svg+xml', webp: 'image/webp' }),
@@ -40,6 +41,11 @@
         imageDirectoryUrl,
         imageIndexUrl: resolveUrl(SITE_SETTINGS.content.index, imageDirectoryUrl),
         imageDataDirectoryUrl: resolveUrl(SITE_SETTINGS.content.dataDirectory, imageDirectoryUrl),
+        resourceEngine: Object.freeze({
+            clientScript: resolveUrl(SITE_SETTINGS.resourceEngine.clientScript, SITE_SETTINGS.siteRootUrl),
+            endpoint: SITE_SETTINGS.resourceEngine.endpoint,
+            type: SITE_SETTINGS.resourceEngine.type,
+        }),
         interface: Object.freeze(Object.fromEntries(
             Object.entries(SITE_SETTINGS.interfacePaths).map(([key, relativePath]) => [key, resolveUrl(relativePath, SITE_SETTINGS.interfaceRootUrl)]),
         )),
