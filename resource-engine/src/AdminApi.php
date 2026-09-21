@@ -158,6 +158,11 @@ final class AdminApi
             $result = $this->engine->delete($type, $this->resourceId());
             $this->responder->json(['ok' => true, 'deleted' => $result['deleted']]);
         }
+        if ($action === 'rename') {
+            $requestedName = trim((string) ($_POST['name'] ?? ''));
+            $result = $this->engine->rename($type, $this->resourceId(), $requestedName);
+            $this->responder->json(['ok' => true, 'renamed' => $result['renamed'], 'id' => $result['id']]);
+        }
         if ($action === 'rebuild') {
             $catalog = $this->engine->rebuild($type);
             $this->responder->json(['ok' => true, 'total' => (int) $catalog['total']]);

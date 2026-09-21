@@ -11,6 +11,7 @@ use Throwable;
 /** Owns catalog, metadata, upload and derivative operations behind one resource contract. */
 final class ResourceEngine
 {
+    private const RENAME_DERIVATIVE_VARIANTS = ['thumbnail', 'optimized'];
     private EngineConfiguration $configuration;
     private ImageProcessor $imageProcessor;
 
@@ -188,6 +189,79 @@ final class ResourceEngine
                 if ($metadataWasWritten) {
                     $this->writeJson($collection->metadataFile(), $metadataBeforeUpload);
                 }
+                throw $error;
+            }
+        });
+    }
+
+    /** Renames one catalog-owned resource while preserving its tags and generated derivatives. */
+    public function rename(string $type, string $resourceId, string $requestedName): array
+    {
+        $collection = $this->configuration->collection($type);
+        $this->loadCatalog($collection);
+        return $this->withLock($collection, function () use ($collection, $resourceId, $requestedName): array {
+            $catalog = $this->readJson($collection->catalogFile());
+            $record = $this->recordFromCatalog($catalog, $resourceId);
+            $oldName = (string) $record['name'];
+            $newName = $collection->validatedUploadName($requestedName);
+            $oldExtension = strtolower((string) pathinfo($oldName, PATHINFO_EXTENSION));
+            $newExtension = strtolower((string) pathinfo($newName, PATHINFO_EXTENSION));
+            if ($oldExtension !== $newExtension) {
+                throw new InvalidArgumentException('Resource extension cannot change during rename.');
+            }
+            if ($oldName === $newName) {
+                return ['renamed' => $newName, 'id' => $resourceId, 'catalog' => $catalog];
+            }
+
+            $newId = $collection->resourceId($newName);
+            $moves = [[$this->sourceFile($collection, $oldName), $this->sourceFile($collection, $newName)]];
+            if (!is_file($moves[0][0])) {
+                throw new RuntimeException('Resource source is unavailable.');
+            }
+            foreach (self::RENAME_DERIVATIVE_VARIANTS as $variant) {
+                // Loop: retained thumbnails and optimized files follow the new opaque id.
+                $moves[] = [$collection->derivedPath($resourceId, $variant), $collection->derivedPath($newId, $variant)];
+            }
+            $metadataBefore = $this->loadMetadata($collection);
+            $metadataAfter = $metadataBefore;
+            if (array_key_exists($resourceId, $metadataAfter)) {
+                $metadataAfter[$newId] = $metadataAfter[$resourceId];
+                unset($metadataAfter[$resourceId]);
+            }
+            $completedMoves = [];
+            $metadataWritten = false;
+            $rebuildStarted = false;
+            try {
+                foreach ($moves as [$source, $destination]) {
+                    // Branch: absent optional derivatives are skipped; existing targets never get overwritten.
+                    if (!is_file($source)) continue;
+                    if (file_exists($destination) || !@rename($source, $destination)) {
+                        throw new RuntimeException('Unable to rename resource without overwriting a file.');
+                    }
+                    $completedMoves[] = [$source, $destination];
+                }
+                if ($metadataAfter !== $metadataBefore) {
+                    $this->writeJson($collection->metadataFile(), $metadataAfter);
+                    $metadataWritten = true;
+                }
+                $rebuildStarted = true;
+                $updatedCatalog = $this->rebuildUnlocked($collection);
+                return ['renamed' => $newName, 'id' => $newId, 'catalog' => $updatedCatalog];
+            } catch (Throwable $error) {
+                $recoveryFailed = false;
+                foreach (array_reverse($completedMoves) as [$source, $destination]) {
+                    // Loop: only this operation's completed moves are reversed after a failure.
+                    if (!@rename($destination, $source)) $recoveryFailed = true;
+                }
+                if ($metadataWritten) {
+                    try { $this->writeJson($collection->metadataFile(), $metadataBefore); }
+                    catch (Throwable $recoveryError) { $recoveryFailed = true; }
+                }
+                if ($rebuildStarted && !$recoveryFailed) {
+                    try { $this->rebuildUnlocked($collection); }
+                    catch (Throwable $recoveryError) { $recoveryFailed = true; }
+                }
+                if ($recoveryFailed) throw new RuntimeException('Resource rename recovery failed.', 0, $error);
                 throw $error;
             }
         });

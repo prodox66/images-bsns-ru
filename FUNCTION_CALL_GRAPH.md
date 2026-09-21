@@ -70,8 +70,6 @@
 
 `resource-engine/src/ResourceEngine.php::upload <- AdminApi upload`
 
-`resource-engine/src/ResourceCollection.php::validatedUploadName <- ResourceEngine::storeUpload, resource-engine contract test`
-
 `resource-engine/src/ResourceEngine.php::buildThumbnailBatch <- AdminApi thumbnails`
 
 `resource-engine/src/ResourceEngine.php::optimize, ResourceEngine::optimizeBatch <- AdminApi optimize/optimize_batch, tests`
@@ -79,6 +77,12 @@
 `resource-engine/src/EngineConfiguration.php::operationBatchSize, operationTimeBudgetSeconds <- ResourceEngine::buildDerivativeBatch`
 
 `resource-engine/src/ResourceEngine.php::delete <- AdminApi delete, tests`
+
+`resource-engine/src/ResourceEngine.php::rename <- AdminApi rename, design.bzn.ru image-gallery-admin gateway, tests; validates the current opaque id and filename inside the collection lock`
+
+`resource-engine/src/ResourceCollection.php::validatedUploadName <- ResourceEngine::storeUpload, ResourceEngine::rename, resource-engine contract test`
+
+`resource-engine/src/AdminApi.php::mutate rename <- AdminApi::run after authorization and CSRF validation`
 
 `resource-engine/src/ImageProcessor.php::thumbnail <- ResourceEngine resource/buildDerivativeBatch`
 

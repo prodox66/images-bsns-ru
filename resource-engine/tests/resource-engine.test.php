@@ -121,8 +121,26 @@ try {
     assertContract($optimized['output_bytes'] > 0, 'Optimized WebP must contain data.');
     assertContract(is_file($sourceFile), 'WebP conversion must not delete the source.');
 
+    // Operation: a rename keeps tags and both derived files attached to the new opaque id.
+    $oldResourceId = $resourceId;
+    $renamedSourceFile = $sourceDirectory . DIRECTORY_SEPARATOR . 'renamed-fixture.png';
+    $renamed = $engine->rename('images', $resourceId, basename($renamedSourceFile));
+    $resourceId = (string) $renamed['id'];
+    assertContract($resourceId !== $oldResourceId, 'Renaming must issue an id for the new name.');
+    assertContract(!is_file($sourceFile) && is_file($renamedSourceFile), 'Renaming must move only the selected source.');
+    assertContract(is_file($collection->derivedPath($resourceId, 'thumbnail')), 'Renaming must preserve its thumbnail.');
+    assertContract(is_file($collection->derivedPath($resourceId, 'optimized')), 'Renaming must preserve its WebP version.');
+    assertContract($engine->list('images', ['blue'])['items'][0]['id'] === $resourceId, 'Renaming must preserve resource tags.');
+    try {
+        $engine->rename('images', $resourceId, 'wrong-extension.jpg');
+        throw new RuntimeException('Extension-changing rename must be rejected.');
+    } catch (InvalidArgumentException $error) {
+        assertContract(is_file($renamedSourceFile), 'Rejected rename must leave the source intact.');
+    }
+    $sourceFile = $renamedSourceFile;
+
     $deleted = $engine->delete('images', $resourceId);
-    assertContract($deleted['deleted'] === 'fixture.png', 'Deletion must report the catalog-owned filename.');
+    assertContract($deleted['deleted'] === basename($renamedSourceFile), 'Deletion must report the catalog-owned filename.');
     assertContract(!is_file($sourceFile), 'Deleted test source must leave the collection.');
     assertContract($engine->list('images')['total'] === 0, 'Catalog must be rebuilt after deletion.');
 
