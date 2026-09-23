@@ -28,34 +28,14 @@ final class ImageProcessor
 
         $sourceImage = $this->decode($sourceFile);
         $thumbnailImage = null;
+        $thumbnailOwnsPixels = false;
         try {
-            $sourceWidth = imagesx($sourceImage);
-            $sourceHeight = imagesy($sourceImage);
             $maximumWidth = $collection->thumbnailMaximumWidth();
             $maximumHeight = $collection->thumbnailMaximumHeight();
-            $scale = min($maximumWidth / $sourceWidth, $maximumHeight / $sourceHeight, 1);
-            $targetWidth = max(1, (int) round($sourceWidth * $scale));
-            $targetHeight = max(1, (int) round($sourceHeight * $scale));
-            $thumbnailImage = $this->transparentCanvas($targetWidth, $targetHeight);
-
-            // Operation: resampling preserves the complete resource instead of cropping masks or photographs.
-            if (!imagecopyresampled(
-                $thumbnailImage,
-                $sourceImage,
-                0,
-                0,
-                0,
-                0,
-                $targetWidth,
-                $targetHeight,
-                $sourceWidth,
-                $sourceHeight
-            )) {
-                throw new RuntimeException('Unable to resample thumbnail.');
-            }
+            [$thumbnailImage, $thumbnailOwnsPixels] = $this->boundedImage($sourceImage, $maximumWidth, $maximumHeight);
             $this->writeWebp($thumbnailImage, $destination, $collection->thumbnailQuality());
         } finally {
-            if ($thumbnailImage !== null) {
+            if ($thumbnailImage !== null && $thumbnailOwnsPixels) {
                 imagedestroy($thumbnailImage);
             }
             imagedestroy($sourceImage);
@@ -63,7 +43,7 @@ final class ImageProcessor
         return $destination;
     }
 
-    /** Creates a non-destructive full-size WebP copy used by the resource response when available. */
+    /** Creates a non-destructive bounded WebP used by the resource response while the original remains available. */
     public function optimize(ResourceCollection $collection, string $sourceFile, string $resourceId): string
     {
         $destination = $collection->derivedPath($resourceId, 'optimized');
@@ -72,9 +52,20 @@ final class ImageProcessor
         }
 
         $sourceImage = $this->decode($sourceFile);
+        $optimizedImage = null;
+        $optimizedOwnsPixels = false;
         try {
-            $this->writeWebp($sourceImage, $destination, $collection->optimizationQuality());
+            $maximumDimension = $collection->optimizationMaximumDimension();
+            [$optimizedImage, $optimizedOwnsPixels] = $this->boundedImage(
+                $sourceImage,
+                $maximumDimension,
+                $maximumDimension
+            );
+            $this->writeWebp($optimizedImage, $destination, $collection->optimizationQuality());
         } finally {
+            if ($optimizedImage !== null && $optimizedOwnsPixels) {
+                imagedestroy($optimizedImage);
+            }
             imagedestroy($sourceImage);
         }
         return $destination;
@@ -115,6 +106,38 @@ final class ImageProcessor
         imagefill($image, 0, 0, $transparent);
         imagesavealpha($image, true);
         return $image;
+    }
+
+    /** Returns the source unchanged when it fits, or one alpha-safe proportional resample owned by the caller. */
+    private function boundedImage($sourceImage, int $maximumWidth, int $maximumHeight): array
+    {
+        $sourceWidth = imagesx($sourceImage);
+        $sourceHeight = imagesy($sourceImage);
+        $scale = min($maximumWidth / $sourceWidth, $maximumHeight / $sourceHeight, 1);
+        $targetWidth = max(1, (int) round($sourceWidth * $scale));
+        $targetHeight = max(1, (int) round($sourceHeight * $scale));
+        if ($targetWidth === $sourceWidth && $targetHeight === $sourceHeight) {
+            return [$sourceImage, false];
+        }
+
+        $targetImage = $this->transparentCanvas($targetWidth, $targetHeight);
+        // Operation: proportional resampling preserves the full image and its alpha channel without cropping.
+        if (!imagecopyresampled(
+            $targetImage,
+            $sourceImage,
+            0,
+            0,
+            0,
+            0,
+            $targetWidth,
+            $targetHeight,
+            $sourceWidth,
+            $sourceHeight
+        )) {
+            imagedestroy($targetImage);
+            throw new RuntimeException('Unable to resample image.');
+        }
+        return [$targetImage, true];
     }
 
     /** Writes a WebP through a temporary sibling and an atomic rename. */

@@ -26,9 +26,16 @@ function assertContract(bool $condition, string $message): void
 }
 
 /** Creates one tiny isolated PNG without depending on repository fixtures. */
-function createTestImage(string $file, int $red, int $green, int $blue): void
+function createTestImage(
+    string $file,
+    int $red,
+    int $green,
+    int $blue,
+    int $width = 24,
+    int $height = 12
+): void
 {
-    $image = imagecreatetruecolor(24, 12);
+    $image = imagecreatetruecolor($width, $height);
     assertContract($image !== false, 'Unable to allocate test image.');
     $color = imagecolorallocate($image, $red, $green, $blue);
     imagefill($image, 0, 0, $color);
@@ -88,7 +95,7 @@ try {
                 'tags' => ['image'],
                 'allowed_mime_by_extension' => ['png' => 'image/png'],
                 'thumbnail' => ['maximum_width' => 8, 'maximum_height' => 8, 'quality' => 76],
-                'optimization' => ['quality' => 84],
+                'optimization' => ['maximum_dimension' => 10, 'quality' => 80],
             ],
         ],
     ];
@@ -120,6 +127,21 @@ try {
     $optimized = $engine->optimize('images', $resourceId);
     assertContract($optimized['output_bytes'] > 0, 'Optimized WebP must contain data.');
     assertContract(is_file($sourceFile), 'WebP conversion must not delete the source.');
+    $optimizedDescriptor = $engine->resource('images', $resourceId, 'resource');
+    $optimizedSize = getimagesize($optimizedDescriptor['path']);
+    assertContract($optimizedDescriptor['mime'] === 'image/webp', 'Resource route must use the current optimized WebP.');
+    assertContract(is_array($optimizedSize) && $optimizedSize[0] === 10 && $optimizedSize[1] === 5, 'Optimized WebP must obey the configured longest side.');
+    $preservedOriginal = $engine->resource('images', $resourceId, 'original');
+    $preservedOriginalSize = getimagesize($preservedOriginal['path']);
+    assertContract($preservedOriginal['mime'] === 'image/png', 'Original route must preserve the source format.');
+    assertContract(is_array($preservedOriginalSize) && $preservedOriginalSize[0] === 24 && $preservedOriginalSize[1] === 12, 'Original route must preserve source pixels for cropper use.');
+
+    // Contract: a changed optimization policy writes to another derivative profile instead of accepting stale WebP files.
+    $alternateSettings = $settings;
+    $alternateSettings['collections']['images']['optimization']['quality'] = 79;
+    $alternateCollection = (new EngineConfiguration($alternateSettings))->collection('images');
+    assertContract($alternateCollection->optimizationProfile() !== $collection->optimizationProfile(), 'Optimization policy must version its derived cache.');
+    assertContract($alternateCollection->optimizedDirectory() !== $collection->optimizedDirectory(), 'Changed optimization policy must not reuse stale derivatives.');
 
     // Operation: a rename keeps tags and both derived files attached to the new opaque id.
     $oldResourceId = $resourceId;
@@ -148,9 +170,14 @@ try {
     $batchNames = ['batch-a.png', 'batch-b.png', 'batch-c.png'];
     $batchBaseModified = time() - 300;
     $batchModifiedStep = 60;
+    $smallBatchWidth = 4;
+    $smallBatchHeight = 2;
     foreach ($batchNames as $index => $batchName) {
         $batchFile = $sourceDirectory . DIRECTORY_SEPARATOR . $batchName;
-        createTestImage($batchFile, 40 + $index, 100, 180);
+        // Branch: the first source proves conversion without enlargement; the rest exercise the 2K-style bound.
+        $batchWidth = $index === 0 ? $smallBatchWidth : 24;
+        $batchHeight = $index === 0 ? $smallBatchHeight : 12;
+        createTestImage($batchFile, 40 + $index, 100, 180, $batchWidth, $batchHeight);
         assertContract(touch($batchFile, $batchBaseModified + ($index * $batchModifiedStep)), 'Unable to set deterministic test modification time.');
     }
     $batchCatalog = $engine->rebuild('images');
@@ -163,6 +190,17 @@ try {
     assertContract($firstBatch['remaining'] === 1, 'First batch must report one remaining derivative.');
     $secondBatch = $engine->optimizeBatch('images');
     assertContract(count($secondBatch['processed']) === 1 && $secondBatch['remaining'] === 0, 'Second batch must finish the remaining derivative.');
+    $smallBatchRecord = array_values(array_filter(
+        $batchCatalog['resources'],
+        static fn(array $record): bool => $record['name'] === $batchNames[0]
+    ))[0] ?? null;
+    assertContract(is_array($smallBatchRecord), 'Small batch source must remain in the catalog.');
+    $smallBatchResource = $engine->resource('images', (string) $smallBatchRecord['id'], 'resource');
+    $smallBatchSize = getimagesize($smallBatchResource['path']);
+    assertContract(
+        is_array($smallBatchSize) && $smallBatchSize[0] === $smallBatchWidth && $smallBatchSize[1] === $smallBatchHeight,
+        'A small source must become WebP without pixel enlargement.'
+    );
 
     echo "Resource engine contract: OK\n";
 } finally {

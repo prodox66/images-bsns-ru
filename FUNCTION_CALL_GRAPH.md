@@ -82,11 +82,19 @@
 
 `resource-engine/src/ResourceCollection.php::validatedUploadName <- ResourceEngine::storeUpload, ResourceEngine::rename, resource-engine contract test`
 
+`resource-engine/src/ResourceCollection.php::optimizationMaximumDimension, ResourceCollection::optimizationQuality <- ImageProcessor::optimize`
+
+`resource-engine/src/ResourceCollection.php::createOptimizationProfileKey <- ResourceCollection::__construct`
+
+`resource-engine/src/ResourceCollection.php::optimizedDirectory <- ResourceCollection::derivedPath, ResourceEngine::ensureRuntimeDirectories, resource-engine contract test`
+
 `resource-engine/src/AdminApi.php::mutate rename <- AdminApi::run after authorization and CSRF validation`
 
 `resource-engine/src/ImageProcessor.php::thumbnail <- ResourceEngine resource/buildDerivativeBatch`
 
 `resource-engine/src/ImageProcessor.php::optimize <- ResourceEngine optimize/buildDerivativeBatch`
+
+`resource-engine/src/ImageProcessor.php::boundedImage <- ImageProcessor::thumbnail, ImageProcessor::optimize`
 
 `resource-engine/src/AdminAuthenticator.php::authorized <- AdminApi status/protected actions; local session or deployment authorization_callback`
 

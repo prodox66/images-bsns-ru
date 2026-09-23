@@ -25,7 +25,8 @@ $sharedImagePolicy = [
         'quality' => 76,
     ],
     'optimization' => [
-        'quality' => 84,
+        'maximum_dimension' => 2048,
+        'quality' => 80,
     ],
 ];
 

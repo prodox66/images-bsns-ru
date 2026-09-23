@@ -17,7 +17,9 @@ final class ResourceCollection
     private int $thumbnailMaximumWidth;
     private int $thumbnailMaximumHeight;
     private int $thumbnailQuality;
+    private int $optimizationMaximumDimension;
     private int $optimizationQuality;
+    private string $optimizationProfileKey;
 
     /** Normalizes one collection configuration before it reaches filesystem code. */
     public function __construct(string $id, array $settings, string $runtimeRoot)
@@ -36,10 +38,20 @@ final class ResourceCollection
 
         $thumbnail = (array) ($settings['thumbnail'] ?? []);
         $optimization = (array) ($settings['optimization'] ?? []);
-        $this->thumbnailMaximumWidth = max(1, (int) ($thumbnail['maximum_width'] ?? 360));
-        $this->thumbnailMaximumHeight = max(1, (int) ($thumbnail['maximum_height'] ?? 360));
-        $this->thumbnailQuality = $this->quality((int) ($thumbnail['quality'] ?? 76));
-        $this->optimizationQuality = $this->quality((int) ($optimization['quality'] ?? 84));
+        $defaultThumbnailMaximumWidth = 360;
+        $defaultThumbnailMaximumHeight = 360;
+        $defaultThumbnailQuality = 76;
+        $defaultOptimizationMaximumDimension = 2048;
+        $defaultOptimizationQuality = 80;
+        $this->thumbnailMaximumWidth = max(1, (int) ($thumbnail['maximum_width'] ?? $defaultThumbnailMaximumWidth));
+        $this->thumbnailMaximumHeight = max(1, (int) ($thumbnail['maximum_height'] ?? $defaultThumbnailMaximumHeight));
+        $this->thumbnailQuality = $this->quality((int) ($thumbnail['quality'] ?? $defaultThumbnailQuality));
+        $this->optimizationMaximumDimension = max(
+            1,
+            (int) ($optimization['maximum_dimension'] ?? $defaultOptimizationMaximumDimension)
+        );
+        $this->optimizationQuality = $this->quality((int) ($optimization['quality'] ?? $defaultOptimizationQuality));
+        $this->optimizationProfileKey = $this->createOptimizationProfileKey();
     }
 
     public function id(): string { return $this->id; }
@@ -51,13 +63,20 @@ final class ResourceCollection
     public function metadataFile(): string { return $this->runtimeDirectory . DIRECTORY_SEPARATOR . 'metadata.json'; }
     public function lockFile(): string { return $this->runtimeDirectory . DIRECTORY_SEPARATOR . '.engine.lock'; }
     public function thumbnailDirectory(): string { return $this->runtimeDirectory . DIRECTORY_SEPARATOR . 'thumbnails'; }
-    public function optimizedDirectory(): string { return $this->runtimeDirectory . DIRECTORY_SEPARATOR . 'optimized'; }
+    public function optimizedDirectory(): string
+    {
+        $optimizedDirectoryName = 'optimized';
+        return $this->runtimeDirectory . DIRECTORY_SEPARATOR . $optimizedDirectoryName
+            . DIRECTORY_SEPARATOR . $this->optimizationProfileKey;
+    }
     public function trashDirectory(): string { return $this->runtimeDirectory . DIRECTORY_SEPARATOR . 'trash'; }
     public function defaultTags(): array { return $this->defaultTags; }
     public function thumbnailMaximumWidth(): int { return $this->thumbnailMaximumWidth; }
     public function thumbnailMaximumHeight(): int { return $this->thumbnailMaximumHeight; }
     public function thumbnailQuality(): int { return $this->thumbnailQuality; }
+    public function optimizationMaximumDimension(): int { return $this->optimizationMaximumDimension; }
     public function optimizationQuality(): int { return $this->optimizationQuality; }
+    public function optimizationProfile(): string { return $this->optimizationProfileKey; }
 
     /** Returns the configured MIME only for an explicitly supported extension. */
     public function mimeForName(string $name): ?string
@@ -138,5 +157,19 @@ final class ResourceCollection
         $minimumQuality = 1;
         $maximumQuality = 100;
         return max($minimumQuality, min($maximumQuality, $quality));
+    }
+
+    /** Versions generated WebP paths whenever their measurable encoding policy changes. */
+    private function createOptimizationProfileKey(): string
+    {
+        $profile = [
+            'format' => 'webp',
+            'maximum_dimension' => $this->optimizationMaximumDimension,
+            'quality' => $this->optimizationQuality,
+        ];
+        $profileJson = json_encode($profile, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+        $hashLength = 16;
+        $profilePrefix = 'profile-';
+        return $profilePrefix . substr(hash('sha256', $profileJson), 0, $hashLength);
     }
 }
