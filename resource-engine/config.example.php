@@ -6,6 +6,8 @@ $engineDirectory = __DIR__;
 $repositoryDirectory = dirname($engineDirectory);
 $defaultRuntimeDirectory = $engineDirectory . DIRECTORY_SEPARATOR . 'runtime';
 $defaultImageDirectory = $repositoryDirectory . DIRECTORY_SEPARATOR . 'images';
+$defaultTextureDirectory = $repositoryDirectory . DIRECTORY_SEPARATOR . 'textures';
+$defaultOverlayDirectory = $repositoryDirectory . DIRECTORY_SEPARATOR . 'overlays';
 
 $supportedMimeByExtension = [
     'avif' => 'image/avif',
@@ -49,9 +51,19 @@ return [
     ],
     'collections' => [
         'resources' => array_replace_recursive($sharedImagePolicy, [
-            'label' => 'Ресурсы',
+            'label' => 'Картинки',
             'source_directory' => $defaultImageDirectory,
             'tags' => ['resource'],
+        ]),
+        'textures' => array_replace_recursive($sharedImagePolicy, [
+            'label' => 'Текстуры',
+            'source_directory' => $defaultTextureDirectory,
+            'tags' => ['texture'],
+        ]),
+        'overlays' => array_replace_recursive($sharedImagePolicy, [
+            'label' => 'Наложения и эффекты',
+            'source_directory' => $defaultOverlayDirectory,
+            'tags' => ['overlay'],
         ]),
     ],
 ];
