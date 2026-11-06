@@ -12,6 +12,8 @@ use Throwable;
 final class ResourceEngine
 {
     private const RENAME_DERIVATIVE_VARIANTS = ['thumbnail', 'optimized'];
+    private const REPLACEMENT = ['one' => 1, 'zero' => 0, 'revision_step' => 1,
+        'random_bytes' => 8, 'prefix' => '.replace-', 'separator' => '-'];
     private EngineConfiguration $configuration;
     private ImageProcessor $imageProcessor;
 
@@ -192,6 +194,75 @@ final class ResourceEngine
                 throw $error;
             }
         });
+    }
+
+    /** Replaces one catalog-owned image; the prior source remains available in the private recovery folder. */
+    public function replace(string $type, string $resourceId, array $uploads): array
+    {
+        $collection = $this->configuration->collection($type);
+        $this->loadCatalog($collection);
+        return $this->withLock($collection, function () use ($collection, $resourceId, $uploads): array {
+            $catalog = $this->readJson($collection->catalogFile());
+            $record = $this->recordFromCatalog($catalog, $resourceId);
+            $files = $this->normalizeUploads($uploads);
+            if (count($files) !== self::REPLACEMENT['one']) throw new InvalidArgumentException('Select one replacement image.');
+            $upload = $files[self::REPLACEMENT['zero']];
+            $name = $this->validatedUpload($collection, $upload);
+            $extension = (string) pathinfo($name, PATHINFO_EXTENSION);
+            $targetName = $collection->validatedUploadName(pathinfo((string) $record['name'], PATHINFO_FILENAME) . '.' . $extension);
+            $staged = tempnam($collection->sourceDirectory(), self::REPLACEMENT['prefix']);
+            if ($staged === false) throw new RuntimeException('Unable to stage replacement.');
+            try {
+                // Branch: only PHP-owned uploads can supply bytes to the locked publication transaction.
+                if (!is_uploaded_file($upload['tmp_name']) || !move_uploaded_file($upload['tmp_name'], $staged)) {
+                    throw new RuntimeException('Unable to stage uploaded replacement.');
+                }
+                return $this->publishReplacement($collection, $resourceId, $record, $staged, $targetName);
+            } finally {
+                if (is_file($staged)) @unlink($staged);
+            }
+        });
+    }
+
+    /** Publishes validated staged bytes atomically and restores the exact previous source on a failed catalog write. */
+    private function publishReplacement(ResourceCollection $collection, string $resourceId, array $record, string $staged, string $name): array
+    {
+        $source = $this->sourceFile($collection, (string) $record['name']);
+        $target = $this->sourceFile($collection, $name);
+        if (!is_file($source) || is_link($source) || ($target !== $source && file_exists($target))) {
+            throw new RuntimeException('The selected resource changed or its target name is already used.');
+        }
+        $this->ensureDirectory($collection->trashDirectory());
+        $recovery = $collection->trashDirectory() . DIRECTORY_SEPARATOR . $resourceId . self::REPLACEMENT['separator']
+            . bin2hex(random_bytes(self::REPLACEMENT['random_bytes'])) . self::REPLACEMENT['separator'] . basename($source);
+        $metadataBefore = $this->loadMetadata($collection);
+        $metadata = $metadataBefore;
+        $id = $collection->resourceId($name);
+        $revision = max(time(), (int) filemtime($source) + self::REPLACEMENT['revision_step']);
+        if (!rename($source, $recovery)) throw new RuntimeException('Unable to preserve previous resource.');
+        $installed = false;
+        try {
+            // Branch: format changes retain the display stem; the real extension continues to describe the uploaded bytes.
+            if (!rename($staged, $target)) throw new RuntimeException('Unable to install replacement.');
+            $installed = true; @chmod($target, 0644); touch($target, $revision);
+            if ($id !== $resourceId && array_key_exists($resourceId, $metadata)) {
+                $metadata[$id] = $metadata[$resourceId]; unset($metadata[$resourceId]);
+                $this->writeJson($collection->metadataFile(), $metadata);
+            }
+            $catalog = $this->rebuildUnlocked($collection);
+        } catch (Throwable $error) {
+            // Recovery touches only this replacement, retaining all unrelated sources and metadata records.
+            if ($installed && is_file($target)) @unlink($target);
+            if (!rename($recovery, $source)) throw new RuntimeException('Replacement recovery failed.', self::REPLACEMENT['zero'], $error);
+            $this->writeJson($collection->metadataFile(), $metadataBefore);
+            $this->rebuildUnlocked($collection);
+            throw $error;
+        }
+        foreach (array_unique([$resourceId, $id]) as $retiredId) {
+            // Loop: successful replacement retires only its own cached derivatives.
+            foreach (self::RENAME_DERIVATIVE_VARIANTS as $variant) @unlink($collection->derivedPath($retiredId, $variant));
+        }
+        return ['replaced' => $name, 'previous_name' => (string) $record['name'], 'id' => $id, 'catalog' => $catalog];
     }
 
     /** Renames one catalog-owned resource while preserving its tags and generated derivatives. */
@@ -476,6 +547,22 @@ final class ResourceEngine
     /** Validates and stores one HTTP upload without overwriting an existing source. */
     private function storeUpload(ResourceCollection $collection, array $upload): string
     {
+        $name = $this->validatedUpload($collection, $upload);
+        $temporaryFile = (string) $upload['tmp_name'];
+        $destination = $this->sourceFile($collection, $name);
+        if (is_file($destination)) {
+            throw new RuntimeException('A resource with this name already exists.');
+        }
+        if (!is_uploaded_file($temporaryFile) || !move_uploaded_file($temporaryFile, $destination)) {
+            throw new RuntimeException('Unable to store uploaded resource.');
+        }
+        @chmod($destination, 0644);
+        return $destination;
+    }
+
+    /** New uploads and addressed replacements share the exact existing size, name and MIME checks. */
+    private function validatedUpload(ResourceCollection $collection, array $upload): string
+    {
         if ((int) $upload['error'] !== UPLOAD_ERR_OK) {
             throw new RuntimeException('Upload transport failed.');
         }
@@ -489,15 +576,7 @@ final class ResourceEngine
         if (!is_string($actualMime) || $actualMime !== $expectedMime) {
             throw new RuntimeException('Upload MIME does not match its extension.');
         }
-        $destination = $this->sourceFile($collection, $name);
-        if (is_file($destination)) {
-            throw new RuntimeException('A resource with this name already exists.');
-        }
-        if (!is_uploaded_file($temporaryFile) || !move_uploaded_file($temporaryFile, $destination)) {
-            throw new RuntimeException('Unable to store uploaded resource.');
-        }
-        @chmod($destination, 0644);
-        return $destination;
+        return $name;
     }
 
     /** Executes one mutation under the collection-specific filesystem lock. */

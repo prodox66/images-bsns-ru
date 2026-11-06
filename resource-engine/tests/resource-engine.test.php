@@ -202,7 +202,40 @@ try {
         'A small source must become WebP without pixel enlargement.'
     );
 
-    echo "Resource engine contract: OK\n";
+    // Addressed replacement uses the actual publication boundary after HTTP upload validation.
+    $publication = new ReflectionMethod(ResourceEngine::class, 'publishReplacement');
+    $replacementCycles = 3; $firstCycle = 0; $cycleStep = 1;
+    $replacementWidth = 12; $replacementHeight = 20;
+    $replacementName = (string) $smallBatchRecord['name'];
+    $replacementId = (string) $smallBatchRecord['id'];
+    $replacementPath = $sourceDirectory . DIRECTORY_SEPARATOR . $replacementName;
+    $engine->setTags('images', $replacementId, ['retained-tag']);
+    for ($cycle = $firstCycle; $cycle < $replacementCycles; $cycle += $cycleStep) {
+        // Loop: every repeat must install exact bytes, keep its identity and retain its immediately preceding version.
+        $previousBytes = file_get_contents($replacementPath);
+        $staged = tempnam($sourceDirectory, '.replacement-test-');
+        createTestImage($staged, $cycle, 90, 120, $replacementWidth, $replacementHeight);
+        $replacementBytes = file_get_contents($staged);
+        $currentCatalog = $engine->rebuild('images');
+        $record = array_values(array_filter($currentCatalog['resources'], static fn(array $item): bool => $item['id'] === $replacementId))[0];
+        $result = $publication->invoke($engine, $collection, $replacementId, $record, $staged, $replacementName);
+        assertContract($result['id'] === $replacementId && $result['replaced'] === $replacementName, 'Same-format replacement must keep its selected identity/name.');
+        assertContract(file_get_contents($replacementPath) === $replacementBytes, 'Replacement must not recompress the uploaded pixels.');
+        assertContract(!file_exists($staged), 'The successfully installed staging file must be consumed.');
+        $recoveries = glob($collection->trashDirectory() . DIRECTORY_SEPARATOR . $replacementId . '-*-' . $replacementName);
+        assertContract(count(array_filter($recoveries, static fn(string $path): bool => file_get_contents($path) === $previousBytes)) > 0, 'The exact preceding source must remain recoverable.');
+        $tagged = $engine->list('images', ['retained-tag']);
+        assertContract($tagged['total'] === 1, 'Replacement must retain the selected resource tags.');
+        assertContract(!is_file($collection->derivedPath($replacementId, 'thumbnail')), 'Replacement must invalidate only its own previous thumbnail.');
+        $engine->resource('images', $replacementId, 'thumbnail');
+    }
+    // A public replacement cannot use an unknown id or a CLI/local file as an HTTP upload.
+    $deniedReplacement = false;
+    try { $engine->replace('images', str_repeat('f', 32), []); }
+    catch (Throwable $error) { $deniedReplacement = true; }
+    assertContract($deniedReplacement, 'Unknown replacement id must be rejected before any byte mutation.');
+
+    echo "Resource engine contract: OK; addressed replacement repeats/recovery/tags/cache PASS3\n";
 } finally {
     removeTestTree($temporaryRoot, $temporaryPrefix);
 }
