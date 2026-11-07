@@ -220,9 +220,9 @@ final class ResourceEngine
     }
 
     /** Keeps the existing admin action; unsupported formats retain their legacy sidecar behavior. */
-    public function setTags(string $type, string $resourceId, array $tags): array
+    public function setTags(string $type, string $resourceId, array $tags, ?callable $publicAliases = null): array
     {
-        return $this->changeTags($type, $resourceId, $tags, self::TAG['replace'], null, true);
+        return $this->changeTags($type, $resourceId, $tags, self::TAG['replace'], null, true, $publicAliases);
     }
 
     /** New callers use a fresh union or an exact replacement bound to the revision they displayed. */

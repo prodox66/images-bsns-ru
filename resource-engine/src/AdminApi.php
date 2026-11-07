@@ -7,6 +7,8 @@ use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
 
+require_once __DIR__ . '/HostedPublicAliases.php';
+
 /** Routes all administration actions while delegating authorization and storage to owners. */
 final class AdminApi
 {
@@ -152,16 +154,16 @@ final class AdminApi
             $this->responder->json(['ok' => true, 'uploaded' => $result['uploaded']]);
         }
         if ($action === 'tags') {
-            $catalog = $this->engine->setTags($type, $this->resourceId(), $this->tags((string) ($_POST['tags'] ?? '')));
+            $catalog = $this->setSelectedTags($type, $this->resourceId(), $this->tags((string) ($_POST['tags'] ?? '')));
             $this->responder->json(['ok' => true, 'total' => (int) $catalog['total']]);
         }
         if ($action === 'delete') {
-            $result = $this->engine->delete($type, $this->resourceId());
+            $result = $this->changeSource($type, $this->resourceId(), $action);
             $this->responder->json(['ok' => true, 'deleted' => $result['deleted']]);
         }
         if ($action === 'rename') {
             $requestedName = trim((string) ($_POST['name'] ?? ''));
-            $result = $this->engine->rename($type, $this->resourceId(), $requestedName);
+            $result = $this->changeSource($type, $this->resourceId(), $action, $requestedName);
             $this->responder->json(['ok' => true, 'renamed' => $result['renamed'], 'id' => $result['id']]);
         }
         if ($action === 'rebuild') {
@@ -185,6 +187,36 @@ final class AdminApi
             ]);
         }
         throw new InvalidArgumentException('Unknown administration action.');
+    }
+
+    /** The authenticated handler resolves only the configured collection; unrelated hosts keep the legacy path. */
+    private function hostedAliases(string $type): ?HostedPublicAliases
+    { return HostedPublicAliases::discover($this->engine->configuration()->collection($type), dirname(__DIR__)); }
+
+    /** Hosted legacy sidecars and writable file tags both recheck the selected source inside the common lock. */
+    private function setSelectedTags(string $type, string $id, array $tags): array
+    {
+        $layout = $this->hostedAliases($type);
+        if ($layout === null) return $this->engine->setTags($type, $id, $tags);
+        return $layout->locked(fn (): array => $this->engine->setTags($type, $id, $tags, $layout->paths(...)));
+    }
+
+    /** A hosted rename or delete retires the old alias before another writer can acquire this collection. */
+    private function changeSource(string $type, string $id, string $action, string $requestedName = ''): array
+    {
+        $rename = $action === 'rename';
+        $operation = fn (): array => $rename ? $this->engine->rename($type, $id, $requestedName) : $this->engine->delete($type, $id);
+        $layout = $this->hostedAliases($type);
+        if ($layout === null) return $operation();
+        return $layout->locked(function () use ($layout, $operation, $type, $id, $rename): array {
+            $previous = $rename ? $this->engine->resource($type, $id, 'original')['name'] : null;
+            $result = $operation();
+            if (!$rename || $previous !== $result['renamed']) {
+                // Branch: an unchanged name keeps its existing public files and cache key.
+                $layout->retire($rename ? $previous : $result['deleted']);
+            }
+            return $result;
+        });
     }
 
     /** Normalizes every bounded maintenance result for the same progress UI. */
