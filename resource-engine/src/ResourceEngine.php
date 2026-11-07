@@ -227,30 +227,55 @@ final class ResourceEngine
 
     /** New callers use a fresh union or an exact replacement bound to the revision they displayed. */
     public function updateTags(string $type, string $resourceId, array $tags, string $operation, ?string $expectedRevision): array
+    { return $this->requestTagUpdate($type, $resourceId, $tags, $operation, $expectedRevision); }
+
+    /** A trusted host can include only its selected current public counterparts in the same tag transaction. */
+    public function updateTagsWithPublicAliases(string $type, string $resourceId, array $tags, string $operation,
+        ?string $expectedRevision, callable $publicAliases): array
+    { return $this->requestTagUpdate($type, $resourceId, $tags, $operation, $expectedRevision, $publicAliases); }
+
+    /** Both strict entry points share the same operation and revision admission. */
+    private function requestTagUpdate(string $type, string $resourceId, array $tags, string $operation,
+        ?string $expectedRevision, ?callable $publicAliases = null): array
     {
         if (!in_array($operation, [self::TAG['add'], self::TAG['replace']], true)
             || $operation === self::TAG['replace'] && ($expectedRevision === null || $expectedRevision === self::TAG['empty'])) {
             throw new InvalidArgumentException(self::TAG['failed']);
         }
-        return $this->changeTags($type, $resourceId, $tags, $operation, $expectedRevision, false);
+        return $this->changeTags($type, $resourceId, $tags, $operation, $expectedRevision, false, $publicAliases);
     }
 
     /** Resolves the selected id again inside the existing collection mutation lock. */
     private function changeTags(string $type, string $resourceId, array $tags, string $operation,
-        ?string $expectedRevision, bool $allowLegacy): array
+        ?string $expectedRevision, bool $allowLegacy, ?callable $publicAliases = null): array
     {
         $collection = $this->configuration->collection($type);
-        $this->loadCatalog($collection);
-        return $this->withLock($collection, function () use ($collection, $resourceId, $tags, $operation, $expectedRevision, $allowLegacy): array {
-            $catalog = $this->readJson($collection->catalogFile());
-            $record = $this->recordFromCatalog($catalog, $resourceId);
-            return $this->writeTagUpdate($collection, $record, $tags, $operation, $expectedRevision, $allowLegacy);
+        // Branch: the existing portable API keeps its catalog lookup; the host list is directory-driven.
+        if ($publicAliases === null) $this->loadCatalog($collection);
+        return $this->withLock($collection, function () use ($collection, $resourceId, $tags, $operation, $expectedRevision, $allowLegacy, $publicAliases): array {
+            $record = $publicAliases === null ? $this->recordFromCatalog($this->readJson($collection->catalogFile()), $resourceId)
+                : $this->currentAliasTagRecord($collection, $resourceId);
+            return $this->writeTagUpdate($collection, $record, $tags, $operation, $expectedRevision, $allowLegacy, $publicAliases);
         });
+    }
+
+    /** Rechecks the host's physical selected ID without publishing an index before alias admission. */
+    private function currentAliasTagRecord(ResourceCollection $collection, string $resourceId): array
+    {
+        $this->assertSourceDirectory($collection);
+        foreach (new DirectoryIterator($collection->sourceDirectory()) as $entry) {
+            // Loop: a new FTP arrival can be selected without trusting an old catalog or following a link.
+            $name = $entry->getFilename();
+            if (!$entry->isFile() || $entry->isLink() || !$collection->supportsName($name)) continue;
+            $id = $collection->resourceId($name);
+            if (hash_equals($id, $resourceId)) return ['id' => $id, 'name' => $name];
+        }
+        throw new InvalidArgumentException('Resource not found.');
     }
 
     /** Stages only the selected source, current cached variants and its sidecar entry. */
     private function writeTagUpdate(ResourceCollection $collection, array $record, array $tags, string $operation,
-        ?string $expectedRevision, bool $allowLegacy): array
+        ?string $expectedRevision, bool $allowLegacy, ?callable $publicAliases): array
     {
         $sidecar = $this->tagMetadata($collection);
         $metadata = $sidecar['entries'];
@@ -265,6 +290,7 @@ final class ResourceEngine
         $recovery = $collection->runtimeDirectory() . DIRECTORY_SEPARATOR . self::TAG['recovery'];
         $legacyOnly = !$state['tag_editable'] && in_array($state['tag_state'],
             [self::TAG['unsupported'], self::TAG['legacy'], self::TAG['absent']], true);
+        $unchanged = []; $missing = [];
         if ($allowLegacy && $legacyOnly) {
             // Branch: existing admin retains sidecar editing only for known untagged/read-only or unsupported formats.
             $legacy['tags'] = $collection->normalizeTags($tags);
@@ -275,16 +301,26 @@ final class ResourceEngine
             if (!$state['tag_editable']) throw new RuntimeException(self::TAG['failed']);
             $source = $this->sourceFile($collection, $name);
             $variants = $this->currentTagVariants($collection, $source, $id);
+            $proof = $publicAliases === null ? ['revisions' => [], 'missing' => []]
+                : $this->publicAliasProof($collection, $name, $variants, $publicAliases);
             // Branch: old setTags retains its effective collection defaults; the new writer is exact.
             $requested = $allowLegacy ? $collection->normalizeTags(array_merge($collection->defaultTags(), $tags)) : $tags;
             $prepared = $this->tagStore()->prepare($source, $collection->mimeForName($name), $requested, $operation,
-                $state['tags'], $expectedRevision, $recovery, $variants);
+                $state['tags'], $expectedRevision, $recovery, array_merge(array_values($variants), array_keys($proof['revisions'])), $proof['revisions']);
             $transaction = $prepared['transaction'];
+            if ($publicAliases !== null) {
+                // Branch: the alias proof cannot be combined with a different source or lose a byte-exact no-op guard.
+                if ($prepared['before_revision'] !== $state['tag_revision']) {
+                    $transaction->rollback();
+                    throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
+                }
+                $unchanged = $prepared['unchanged']; $missing = $proof['missing'];
+            }
             unset($legacy['tags']);
             $legacy[self::TAG['embedded_marker']] = true;
         }
         $metadata[$id] = $legacy;
-        return $this->publishTagUpdate($collection, $transaction, $metadata, $sidecar['bytes']);
+        return $this->publishTagUpdate($collection, $transaction, $metadata, $sidecar['bytes'], $unchanged, $missing);
     }
 
     /** Selects only existing variants that already correspond to this source; no derivative is generated by a tag action. */
@@ -294,14 +330,51 @@ final class ResourceEngine
         foreach (self::RENAME_DERIVATIVE_VARIANTS as $variant) {
             // Loop: the processor's existing freshness rule selects its own exact cached file.
             $path = $collection->derivedPath($id, $variant);
-            if ($this->imageProcessor->isCurrent($source, $path)) $variants[] = $path;
+            if ($this->imageProcessor->isCurrent($source, $path)) $variants[$variant] = $path;
         }
         return $variants;
     }
 
+    /** Existing aliases are admitted only under the exact public category and tied to a current ready variant. */
+    private function publicAliasProof(ResourceCollection $collection, string $name, array $variants, callable $publicAliases): array
+    {
+        $source = realpath($collection->sourceDirectory());
+        $aliases = $publicAliases($collection, $name);
+        if (!is_string($source) || !is_array($aliases) || array_diff_key($aliases, array_flip(self::RENAME_DERIVATIVE_VARIANTS))) {
+            throw new RuntimeException(self::TAG['failed']);
+        }
+        $category = dirname($source);
+        $revisions = []; $missing = []; $seen = [];
+        foreach ($aliases as $variant => $path) {
+            // Loop: no arbitrary type, duplicate path, private source, or external directory can become a public alias.
+            if (!is_string($path) || !$this->publicAliasPath($category, $source, $variant, $path)
+                || in_array($path, $variants, true) || isset($seen[$path])) throw new RuntimeException(self::TAG['failed']);
+            $seen[$path] = true;
+            $parent = dirname($path);
+            clearstatcache(true, $path);
+            if (is_link($path) || is_link($parent) || is_dir($parent) && @realpath($parent) !== $parent) {
+                throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
+            }
+            if (!file_exists($path)) { $missing[] = $path; continue; }
+            // Branch: an unbound or stale alias is never rewritten or silently left behind by a tag edit.
+            if (!isset($variants[$variant]) || @realpath($path) !== $path) throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
+            $revisions += $this->tagStore()->bindCurrentAlias($variants[$variant], $path);
+        }
+        return ['revisions' => $revisions, 'missing' => $missing];
+    }
+
+    /** Working WebP is directly in the category; its public preview is in one child, outside originals. */
+    private function publicAliasPath(string $category, string $source, string $variant, string $path): bool
+    {
+        $parent = dirname($path);
+        if ($path !== $parent . DIRECTORY_SEPARATOR . basename($path) || pathinfo($path, PATHINFO_EXTENSION) !== 'webp') return false;
+        if ($variant === self::DELIVERY['optimized']) return $parent === $category;
+        return dirname($parent) === $category && $parent !== $source && !in_array(basename($parent), ['.', '..'], true);
+    }
+
     /** The two catalog artifacts join the same recovery boundary as the selected metadata edit. */
     private function publishTagUpdate(ResourceCollection $collection, ImageTagTransaction $transaction,
-        array $metadata, ?string $previousSidecar): array
+        array $metadata, ?string $previousSidecar, array $unchanged, array $missing): array
     {
         try {
             $transaction->stage($collection->metadataFile(), $previousSidecar, $this->jsonText($metadata));
@@ -314,12 +387,27 @@ final class ResourceEngine
                 $transaction->stage($path, $before, $bytes);
             }
             $transaction->install();
+            $this->verifyUnchangedTagTargets($unchanged, $missing);
             $transaction->commit();
             return $catalog;
         } catch (Throwable $error) {
             // Recovery: only matching installed bytes are rolled back; newer external bytes are never erased.
             $transaction->rollback();
             throw $error;
+        }
+    }
+
+    /** A no-op or missing alias is still part of the selected family at the publication boundary. */
+    private function verifyUnchangedTagTargets(array $unchanged, array $missing): void
+    {
+        foreach ($unchanged as $path => $revision) {
+            // Loop: a newer inode cannot be reported as part of the just-committed tag edit.
+            if (@ImageTagTransaction::revision($path) !== $revision) throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
+        }
+        foreach ($missing as $path) {
+            // Loop: metadata editing does not create absent variants or adopt a concurrently published alias.
+            clearstatcache(true, $path);
+            if (file_exists($path) || is_link($path)) throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
         }
     }
 

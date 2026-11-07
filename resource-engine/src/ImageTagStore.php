@@ -15,6 +15,7 @@ final class ImageTagTransaction
     private const C = ['zero' => 0, 'one' => 1, 'empty' => '', 'hash' => 'sha256', 'directory_mode' => 0700,
         'private_mode' => 0600, 'permission_mask' => 0777, 'new_prefix' => '.tags-new-', 'old_prefix' => 'tags-old-',
         'conflict' => 409, 'changed' => 'Image changed during metadata editing.', 'failed' => 'Unable to store image tags.'];
+    private const LINK_IDENTITY = ['dev' => true, 'ino' => true, 'mode' => true, 'uid' => true, 'gid' => true, 'size' => true, 'mtime' => true];
     private array $records = [];
     private bool $closed = false;
     private string $recoveryDirectory;
@@ -54,6 +55,7 @@ final class ImageTagTransaction
         if (isset($this->records[$path])) throw new InvalidArgumentException(self::C['failed']);
         $beforeHash = $before === null ? null : hash(self::C['hash'], $before);
         $record = ['path' => $path, 'before_hash' => $beforeHash, 'after_hash' => hash(self::C['hash'], $after),
+            'before_size' => $before === null ? null : strlen($before), 'after_size' => strlen($after),
             'revision' => self::revision($path), 'installed' => false, 'temporary' => null, 'recovery' => null, 'after_revision' => null];
         if (!$this->matches($record, false) || $expectedRevision !== null && !hash_equals($expectedRevision, $record['revision'])) {
             throw new RuntimeException(self::C['changed'], self::C['conflict']);
@@ -80,7 +82,7 @@ final class ImageTagTransaction
             foreach ($this->records as &$record) {
                 // Loop: a fresh revision and digest check occurs immediately before each atomic replacement.
                 if ($record['installed']) continue;
-                if (!$this->matches($record, false) || self::revision($record['path']) !== $record['revision']) {
+                if (!$this->matches($record, false) || !$this->pendingRevisionMatches($record)) {
                     throw new RuntimeException(self::C['changed'], self::C['conflict']);
                 }
                 if (!rename($record['temporary'], $record['path'])) throw new RuntimeException(self::C['failed']);
@@ -92,6 +94,24 @@ final class ImageTagTransaction
             unset($record);
             $this->rollback(); throw $error;
         }
+    }
+
+    /** Replacing one hardlink changes ctime on its still-pending siblings without changing their data. */
+    private function pendingRevisionMatches(array $record): bool
+    {
+        if (self::revision($record['path']) === $record['revision']) return true;
+        $before = $record['stat'];
+        $current = is_link($record['path']) ? false : @stat($record['path']);
+        if (!is_array($before) || !is_array($current)
+            || array_intersect_key($before, self::LINK_IDENTITY) !== array_intersect_key($current, self::LINK_IDENTITY)) return false;
+        $removed = self::C['zero'];
+        foreach ($this->records as $installed) {
+            // Loop: only this transaction's already displaced links can explain a changed old link count.
+            $original = $installed['stat'];
+            if ($installed['installed'] && is_array($original) && $original['dev'] === $before['dev'] && $original['ino'] === $before['ino']) $removed++;
+        }
+        // The caller still requires the exact original digest before moving this sibling.
+        return $removed > self::C['zero'] && $current['nlink'] === $before['nlink'] - $removed;
     }
 
     /** A newer external version is kept; its exact original recovery file remains available rather than being overwritten. */
@@ -139,7 +159,7 @@ final class ImageTagTransaction
         $path = $record['path']; clearstatcache(true, $path);
         $expected = $record[$after ? 'after_hash' : 'before_hash'];
         if ($expected === null) return !file_exists($path) && !is_link($path);
-        if (is_link($path) || !is_file($path)) return false;
+        if (is_link($path) || !is_file($path) || @filesize($path) !== $record[$after ? 'after_size' : 'before_size']) return false;
         $digest = hash_file(self::C['hash'], $path);
         return is_string($digest) && hash_equals($expected, $digest);
     }
@@ -193,6 +213,30 @@ final class ImageTagStore
     public function __construct(private readonly int $maximumBytes = self::C['maximum_edit_bytes'])
     { $this->reader = new ImageTags(); $this->writer = new ImageTags($maximumBytes); }
 
+    /** Binds an existing exact public file to its current derived counterpart before staging. */
+    public function bindCurrentAlias(string $variant, string $alias): array
+    {
+        $first = @ImageTagTransaction::revision($variant); $second = @ImageTagTransaction::revision($alias);
+        if ($variant === $alias || $first === self::C['empty'] || $second === self::C['empty']) {
+            throw new RuntimeException(self::C['changed'], self::C['conflict']);
+        }
+        if (!hash_equals($first, $second)) {
+            // Branch: same-inode aliases need no extra read; real copies must have the exact bounded bytes.
+            $size = @filesize($variant);
+            if (!is_int($size) || $size > $this->maximumBytes || @filesize($alias) !== $size) {
+                throw new RuntimeException(self::C['changed'], self::C['conflict']);
+            }
+            $digest = @hash_file('sha256', $variant); $copy = @hash_file('sha256', $alias);
+            if (!is_string($digest) || !is_string($copy) || !hash_equals($digest, $copy)) {
+                throw new RuntimeException(self::C['changed'], self::C['conflict']);
+            }
+        }
+        if (@ImageTagTransaction::revision($variant) !== $first || @ImageTagTransaction::revision($alias) !== $second) {
+            throw new RuntimeException(self::C['changed'], self::C['conflict']);
+        }
+        return [$variant => $first, $alias => $second];
+    }
+
     /** Header reads distinguish known-empty, legacy fallback, unsupported data and parse errors. */
     public function snapshot(string $path, string $mime, array $legacy = []): array
     {
@@ -213,7 +257,7 @@ final class ImageTagStore
 
     /** The lock owner supplies only already-resolved source/variant paths and its current legacy entry. */
     public function prepare(string $path, string $mime, array $tags, string $operation, array $legacy,
-        ?string $expectedRevision, string $recoveryDirectory, array $variants = []): array
+        ?string $expectedRevision, string $recoveryDirectory, array $variants = [], array $variantRevisions = []): array
     {
         if (!in_array($operation, [self::C['add'], self::C['replace']], true) || !in_array($mime, self::C['supported_mimes'], true)) {
             throw new InvalidArgumentException(self::C['failed']);
@@ -229,15 +273,19 @@ final class ImageTagStore
             $current ?? $this->legacy($legacy), $requested), SORT_STRING))) : $requested;
         $transaction = new ImageTagTransaction($recoveryDirectory, $this->maximumBytes);
         try {
-            $transaction->stage($path, $before, $this->writer->embed($before, $wanted), $revision);
+            $unchanged = [];
+            if (!$transaction->stage($path, $before, $this->writer->embed($before, $wanted), $revision)) $unchanged[$path] = $revision;
             foreach (array_unique($variants) as $variant) {
                 // Loop: existing current variants receive metadata only; this path never creates or encodes a derivative.
                 if ($variant === $path) continue;
                 $variantRevision = ImageTagTransaction::revision($variant);
+                if (isset($variantRevisions[$variant]) && $variantRevisions[$variant] !== $variantRevision) {
+                    throw new RuntimeException(self::C['changed'], self::C['conflict']);
+                }
                 $bytes = $this->bytes($variant);
-                $transaction->stage($variant, $bytes, $this->writer->embed($bytes, $wanted), $variantRevision);
+                if (!$transaction->stage($variant, $bytes, $this->writer->embed($bytes, $wanted), $variantRevision)) $unchanged[$variant] = $variantRevision;
             }
-            return ['transaction' => $transaction, 'tags' => $wanted, 'before_revision' => $revision];
+            return ['transaction' => $transaction, 'tags' => $wanted, 'before_revision' => $revision, 'unchanged' => $unchanged];
         } catch (Throwable $error) { $transaction->rollback(); throw $error; }
     }
 
