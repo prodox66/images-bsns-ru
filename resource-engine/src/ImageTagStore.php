@@ -203,7 +203,7 @@ final class ImageTagTransaction
 /** Shared file-tag states and ADD/REPLACE preparation keep persistence out of both gallery renderers. */
 final class ImageTagStore
 {
-    private const C = ['empty' => '', 'zero' => 0, 'maximum_edit_bytes' => 20971520,
+    private const C = ['empty' => '', 'zero' => 0, 'one' => 1, 'hash' => 'sha256', 'read_mode' => 'rb', 'maximum_edit_bytes' => 20971520,
         'supported_mimes' => ['image/png', 'image/jpeg', 'image/webp'], 'add' => 'add', 'replace' => 'replace',
         'known' => 'embedded', 'legacy' => 'legacy', 'absent' => 'absent', 'unsupported' => 'unsupported', 'error' => 'error',
         'conflict' => 409, 'changed' => 'Image changed during metadata editing.', 'failed' => 'Image tags are unavailable.'];
@@ -220,13 +220,14 @@ final class ImageTagStore
         if ($variant === $alias || $first === self::C['empty'] || $second === self::C['empty']) {
             throw new RuntimeException(self::C['changed'], self::C['conflict']);
         }
+        $digest = null;
         if (!hash_equals($first, $second)) {
             // Branch: same-inode aliases need no extra read; real copies must have the exact bounded bytes.
             $size = @filesize($variant);
             if (!is_int($size) || $size > $this->maximumBytes || @filesize($alias) !== $size) {
                 throw new RuntimeException(self::C['changed'], self::C['conflict']);
             }
-            $digest = @hash_file('sha256', $variant); $copy = @hash_file('sha256', $alias);
+            $digest = $this->boundedDigest($variant, $size); $copy = $this->boundedDigest($alias, $size);
             if (!is_string($digest) || !is_string($copy) || !hash_equals($digest, $copy)) {
                 throw new RuntimeException(self::C['changed'], self::C['conflict']);
             }
@@ -234,7 +235,9 @@ final class ImageTagStore
         if (@ImageTagTransaction::revision($variant) !== $first || @ImageTagTransaction::revision($alias) !== $second) {
             throw new RuntimeException(self::C['changed'], self::C['conflict']);
         }
-        return [$variant => $first, $alias => $second];
+        // A copy keeps its verified digest; a hardlink must match the counterpart bytes read during staging.
+        return [$variant => ['revision' => $first, 'digest' => $digest],
+            $alias => ['revision' => $second, 'digest' => $digest, 'counterpart' => $variant]];
     }
 
     /** Header reads distinguish known-empty, legacy fallback, unsupported data and parse errors. */
@@ -257,7 +260,8 @@ final class ImageTagStore
 
     /** The lock owner supplies only already-resolved source/variant paths and its current legacy entry. */
     public function prepare(string $path, string $mime, array $tags, string $operation, array $legacy,
-        ?string $expectedRevision, string $recoveryDirectory, array $variants = [], array $variantRevisions = []): array
+        ?string $expectedRevision, string $recoveryDirectory, array $variants = [], array $variantProofs = [],
+        bool $observeUnchanged = false): array
     {
         if (!in_array($operation, [self::C['add'], self::C['replace']], true) || !in_array($mime, self::C['supported_mimes'], true)) {
             throw new InvalidArgumentException(self::C['failed']);
@@ -273,20 +277,64 @@ final class ImageTagStore
             $current ?? $this->legacy($legacy), $requested), SORT_STRING))) : $requested;
         $transaction = new ImageTagTransaction($recoveryDirectory, $this->maximumBytes);
         try {
-            $unchanged = [];
-            if (!$transaction->stage($path, $before, $this->writer->embed($before, $wanted), $revision)) $unchanged[$path] = $revision;
+            $unchanged = []; $digests = [];
+            if (!$transaction->stage($path, $before, $this->writer->embed($before, $wanted), $revision) && $observeUnchanged) {
+                $unchanged[$path] = $this->unchangedProof($before, $revision);
+            }
             foreach (array_unique($variants) as $variant) {
                 // Loop: existing current variants receive metadata only; this path never creates or encodes a derivative.
                 if ($variant === $path) continue;
                 $variantRevision = ImageTagTransaction::revision($variant);
-                if (isset($variantRevisions[$variant]) && $variantRevisions[$variant] !== $variantRevision) {
+                $proof = $variantProofs[$variant] ?? null;
+                if ($proof !== null && $proof['revision'] !== $variantRevision) {
                     throw new RuntimeException(self::C['changed'], self::C['conflict']);
                 }
                 $bytes = $this->bytes($variant);
-                if (!$transaction->stage($variant, $bytes, $this->writer->embed($bytes, $wanted), $variantRevision)) $unchanged[$variant] = $variantRevision;
+                if ($proof !== null) $digests[$variant] = $this->assertVariantBytes($bytes, $proof, $digests);
+                if (!$transaction->stage($variant, $bytes, $this->writer->embed($bytes, $wanted), $variantRevision) && $observeUnchanged) {
+                    $unchanged[$variant] = $this->unchangedProof($bytes, $variantRevision);
+                }
             }
             return ['transaction' => $transaction, 'tags' => $wanted, 'before_revision' => $revision, 'unchanged' => $unchanged];
         } catch (Throwable $error) { $transaction->rollback(); throw $error; }
+    }
+
+    /** Exact stage bytes must still satisfy the proof that admitted this selected alias. */
+    private function assertVariantBytes(string $bytes, array $proof, array $digests): string
+    {
+        $actual = hash(self::C['hash'], $bytes);
+        $expected = $proof['digest'] ?? (isset($proof['counterpart']) ? ($digests[$proof['counterpart']] ?? self::C['empty']) : null);
+        if ($expected !== null && !hash_equals($expected, $actual)) {
+            throw new RuntimeException(self::C['changed'], self::C['conflict']);
+        }
+        return $actual;
+    }
+
+    /** An opted-in unchanged target keeps a digest of the bytes already read for preparation. */
+    private function unchangedProof(string $bytes, string $revision): array
+    { return ['revision' => $revision, 'size' => strlen($bytes), 'digest' => hash(self::C['hash'], $bytes)]; }
+
+    /** No-op publication verifies bounded content and then the current identity, without rewriting the file. */
+    public function unchangedMatches(string $path, array $proof): bool
+    {
+        $size = $proof['size']; $expected = $proof['revision'];
+        if (@ImageTagTransaction::revision($path) !== $expected) return false;
+        $digest = $this->boundedDigest($path, $size);
+        return $digest !== null && hash_equals($proof['digest'], $digest) && @ImageTagTransaction::revision($path) === $expected;
+    }
+
+    /** A changed file cannot consume more than its verified size plus the extra-byte guard. */
+    private function boundedDigest(string $path, int $size): ?string
+    {
+        if ($size > $this->maximumBytes) return null;
+        $stream = @fopen($path, self::C['read_mode']);
+        if ($stream === false) return null;
+        try {
+            // Branch: an in-place growth can only consume the expected length and one extra byte.
+            $hash = hash_init(self::C['hash']);
+            $read = @hash_update_stream($hash, $stream, $size + self::C['one']);
+            return $read === $size ? hash_final($hash) : null;
+        } finally { fclose($stream); }
     }
 
     /** Only the historical boundary converts scalar legacy tags; embedded envelopes stay strictly string typed. */

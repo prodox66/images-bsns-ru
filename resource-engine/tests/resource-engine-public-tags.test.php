@@ -9,6 +9,14 @@ namespace Bzn\ResourceEngine {
         if (isset($GLOBALS['bznAliasAfterDigest'])) ($GLOBALS['bznAliasAfterDigest'])($path);
         return $digest;
     }
+
+    /** Places a real selected-copy edit just after its bounded comparison read. */
+    function hash_update_stream(\HashContext $context, $stream, int $length = -1): int
+    {
+        $read = \hash_update_stream($context, $stream, $length);
+        if (isset($GLOBALS['bznAliasAfterStream'])) ($GLOBALS['bznAliasAfterStream'])(stream_get_meta_data($stream)['uri']);
+        return $read;
+    }
 }
 
 namespace {
@@ -30,7 +38,8 @@ namespace {
         private const C = ['prefix' => 'bzn-public-tag-alias-', 'mode' => 0700, 'random' => 8, 'width' => 4, 'height' => 3,
             'type' => 'images', 'name' => 'selected.png', 'other' => 'unrelated.png', 'thumb' => 'thumbnail', 'opt' => 'optimized',
             'before' => ['0', 'old'], 'after' => ['0', 'new'], 'external' => ['0', 'ext'], 'replace' => 'replace', 'add' => 'add',
-            'conflict' => 409, 'tick' => 1, 'second_digest' => 2, 'zero' => 0];
+            'conflict' => 409, 'tick' => 1, 'second_digest' => 2, 'zero' => 0,
+            'safe_fraction' => 0.5, 'microseconds' => 1000000, 'clock_margin' => 20000];
         private string $root;
         private string $source;
         private string $other;
@@ -215,10 +224,70 @@ namespace {
                 && $this->bytes(array_keys($before)) === $before, 'No-op alias swap left a stale committed catalog or reverted newer bytes.');
         }
 
+        /** A same-inode same-stat edit during a byte-exact command is visible to the bounded digest guard. */
+        private function sameStatNoOp(): void
+        {
+            $this->edit(self::C['before']);
+            $selected = $this->aliases[self::C['thumb']]; $sidecar = $this->collection->metadataFile();
+            $old = file_get_contents($selected); $external = $this->codec->embed($old, self::C['external']);
+            file_put_contents($sidecar, json_encode([$this->id => ['tags' => ['retire']]], JSON_THROW_ON_ERROR));
+            $index = $this->bytes([$sidecar, $this->collection->catalogFile(), $this->collection->catalogScriptFile()]);
+            $mtime = $this->sameSecond($selected);
+            $expected = ImageTagTransaction::revision($selected); $observed = null; $calls = self::C['zero'];
+            $GLOBALS['bznAliasAfterDigest'] = function (string $file) use ($sidecar, $selected, $external, $mtime, &$observed, &$calls): void {
+                if ($file === $sidecar && ++$calls === self::C['second_digest']) {
+                    file_put_contents($selected, $external); touch($selected, $mtime);
+                    $observed = ImageTagTransaction::revision($selected);
+                }
+            };
+            try { $this->rejects(fn () => $this->edit(self::C['before']), self::C['conflict']); }
+            finally { unset($GLOBALS['bznAliasAfterDigest']); }
+            $this->check($observed === $expected && strlen($old) === strlen($external) && $old !== $external,
+                'Fixture did not exercise an actual same-stat byte change.');
+            $this->check(file_get_contents($selected) === $external && $this->bytes(array_keys($index)) === $index,
+                'A byte-exact command changed the concurrent alias or published a stale index.');
+        }
+
+        /** The staging bytes must match the earlier exact alias proof even at unchanged stat. */
+        private function sameStatAtAdmission(): void
+        {
+            $selected = $this->aliases[self::C['thumb']]; $current = file_get_contents($this->variants[self::C['thumb']]);
+            file_put_contents($selected, $current);
+            $external = $this->codec->embed($current, self::C['external']);
+            $paths = array_values(array_diff($this->files(), [$selected]));
+            $index = $this->bytes([...$paths, $this->collection->metadataFile(), $this->collection->catalogFile(), $this->collection->catalogScriptFile()]);
+            $mtime = $this->sameSecond($selected);
+            $expected = ImageTagTransaction::revision($selected); $observed = null;
+            $GLOBALS['bznAliasAfterStream'] = function (string $file) use ($selected, $external, $mtime, &$observed): void {
+                if ($file === $selected && $observed === null) {
+                    file_put_contents($selected, $external); touch($selected, $mtime);
+                    $observed = ImageTagTransaction::revision($selected);
+                }
+            };
+            try { $this->rejects(fn () => $this->edit(self::C['after']), self::C['conflict']); }
+            finally { unset($GLOBALS['bznAliasAfterStream']); }
+            $this->check($observed === $expected && strlen($current) === strlen($external) && $current !== $external,
+                'Fixture did not keep the edited alias at the same observed stat.');
+            $this->check(file_get_contents($selected) === $external && $this->bytes(array_keys($index)) === $index,
+                'A same-stat alias change during proof became an admitted write.');
+        }
+
+        /** Keeps two real Linux ctime observations in one second without simulating the filesystem. */
+        private function sameSecond(string $path): int
+        {
+            $at = microtime(true); $fraction = $at - floor($at);
+            if ($fraction > self::C['safe_fraction']) {
+                // Branch: a brief wait leaves enough of the next second for the tiny transaction.
+                usleep((int) ((self::C['tick'] - $fraction) * self::C['microseconds']) + self::C['clock_margin']);
+            }
+            clearstatcache(true, $path); $mtime = filemtime($path); touch($path, $mtime);
+            return $mtime;
+        }
+
         public function run(): void
         {
             try {
-                $this->success(); $this->admission(); $this->recovery(); $this->swaps();
+                $this->success(); $this->admission(); $this->recovery(); $this->swaps(); $this->sameStatNoOp(); $this->sameStatAtAdmission();
                 echo 'PASS public alias tag transaction: ' . $this->checks . ' actual assertions.' . PHP_EOL;
             } finally {
                 // Cleanup: only this exact generated fixture tree and no links followed.

@@ -301,12 +301,13 @@ final class ResourceEngine
             if (!$state['tag_editable']) throw new RuntimeException(self::TAG['failed']);
             $source = $this->sourceFile($collection, $name);
             $variants = $this->currentTagVariants($collection, $source, $id);
-            $proof = $publicAliases === null ? ['revisions' => [], 'missing' => []]
+            $proof = $publicAliases === null ? ['files' => [], 'missing' => []]
                 : $this->publicAliasProof($collection, $name, $variants, $publicAliases);
             // Branch: old setTags retains its effective collection defaults; the new writer is exact.
             $requested = $allowLegacy ? $collection->normalizeTags(array_merge($collection->defaultTags(), $tags)) : $tags;
             $prepared = $this->tagStore()->prepare($source, $collection->mimeForName($name), $requested, $operation,
-                $state['tags'], $expectedRevision, $recovery, array_merge(array_values($variants), array_keys($proof['revisions'])), $proof['revisions']);
+                $state['tags'], $expectedRevision, $recovery, array_merge(array_values($variants), array_keys($proof['files'])),
+                $proof['files'], $publicAliases !== null);
             $transaction = $prepared['transaction'];
             if ($publicAliases !== null) {
                 // Branch: the alias proof cannot be combined with a different source or lose a byte-exact no-op guard.
@@ -344,7 +345,7 @@ final class ResourceEngine
             throw new RuntimeException(self::TAG['failed']);
         }
         $category = dirname($source);
-        $revisions = []; $missing = []; $seen = [];
+        $files = []; $missing = []; $seen = [];
         foreach ($aliases as $variant => $path) {
             // Loop: no arbitrary type, duplicate path, private source, or external directory can become a public alias.
             if (!is_string($path) || !$this->publicAliasPath($category, $source, $variant, $path)
@@ -358,9 +359,9 @@ final class ResourceEngine
             if (!file_exists($path)) { $missing[] = $path; continue; }
             // Branch: an unbound or stale alias is never rewritten or silently left behind by a tag edit.
             if (!isset($variants[$variant]) || @realpath($path) !== $path) throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
-            $revisions += $this->tagStore()->bindCurrentAlias($variants[$variant], $path);
+            $files += $this->tagStore()->bindCurrentAlias($variants[$variant], $path);
         }
-        return ['revisions' => $revisions, 'missing' => $missing];
+        return ['files' => $files, 'missing' => $missing];
     }
 
     /** Working WebP is directly in the category; its public preview is in one child, outside originals. */
@@ -400,9 +401,9 @@ final class ResourceEngine
     /** A no-op or missing alias is still part of the selected family at the publication boundary. */
     private function verifyUnchangedTagTargets(array $unchanged, array $missing): void
     {
-        foreach ($unchanged as $path => $revision) {
-            // Loop: a newer inode cannot be reported as part of the just-committed tag edit.
-            if (@ImageTagTransaction::revision($path) !== $revision) throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
+        foreach ($unchanged as $path => $proof) {
+            // Loop: even an in-place change with the same stat cannot become part of the just-committed edit.
+            if (!$this->tagStore()->unchangedMatches($path, $proof)) throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
         }
         foreach ($missing as $path) {
             // Loop: metadata editing does not create absent variants or adopt a concurrently published alias.
