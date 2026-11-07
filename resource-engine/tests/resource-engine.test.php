@@ -209,7 +209,10 @@ try {
     $replacementName = (string) $smallBatchRecord['name'];
     $replacementId = (string) $smallBatchRecord['id'];
     $replacementPath = $sourceDirectory . DIRECTORY_SEPARATOR . $replacementName;
-    $engine->setTags('images', $replacementId, ['retained-tag']);
+    // Setup: exercise the historical sidecar case without converting it into a new embedded tag write.
+    $legacyMetadata = is_file($collection->metadataFile()) ? json_decode((string) file_get_contents($collection->metadataFile()), true) : [];
+    $legacyMetadata[$replacementId] = ['tags' => ['retained-tag']];
+    file_put_contents($collection->metadataFile(), json_encode($legacyMetadata, JSON_THROW_ON_ERROR));
     for ($cycle = $firstCycle; $cycle < $replacementCycles; $cycle += $cycleStep) {
         // Loop: every repeat must install exact bytes, keep its identity and retain its immediately preceding version.
         $previousBytes = file_get_contents($replacementPath);

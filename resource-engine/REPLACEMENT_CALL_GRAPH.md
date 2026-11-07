@@ -13,3 +13,5 @@ resource-engine/src/ResourceEngine.php::rebuildUnlocked <- publishReplacement, e
 
 Other callers of the new methods were not found. Contract tests also exercise
 the private staged-publication boundary with isolated temporary directories.
+
+36.4 keeps the previous raw exact-byte branch for legacy/no-embedded sources and for an already embedded incoming file. Only a prior embedded set on a supported untagged upload is copied into its own metadata block before the existing writer. That stage must pass the same size/format admission, or the selected original stays in place. See [IMAGE_TAG_ENGINE_CALL_GRAPH.md](IMAGE_TAG_ENGINE_CALL_GRAPH.md) for the current calls and tests.

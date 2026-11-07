@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace Bzn\ResourceEngine;
 
 use InvalidArgumentException;
+use RuntimeException;
 use Throwable;
 
 /** Exposes list and binary-resource black boxes without revealing storage implementation. */
@@ -49,6 +50,10 @@ final class PublicApi
         } catch (InvalidArgumentException $error) {
             $this->responder->json(['ok' => false, 'error' => $error->getMessage()], 400);
         } catch (Throwable $error) {
+            // Branch: incomplete tag data is a temporary list condition, without exposing its source path.
+            if ($error instanceof RuntimeException && $error->getCode() === ResourceEngine::TAG_FILTER_UNAVAILABLE) {
+                $this->responder->json(['ok' => false, 'error' => 'Image tag metadata is incomplete.'], ResourceEngine::TAG_FILTER_UNAVAILABLE);
+            }
             $this->responder->json(['ok' => false, 'error' => 'Resource service is temporarily unavailable.'], 500);
         }
     }

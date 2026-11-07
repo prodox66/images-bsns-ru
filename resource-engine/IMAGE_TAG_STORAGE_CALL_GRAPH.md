@@ -1,5 +1,7 @@
 # File-tag storage boundary36 — before wiring
 
+36.4 update: the section below is the historical isolated checkpoint. Current Engine/ImageProcessor production edges, shared collection lock, selected catalog staging and replacement preparation are recorded in [IMAGE_TAG_ENGINE_CALL_GRAPH.md](IMAGE_TAG_ENGINE_CALL_GRAPH.md).
+
 07.11.2026: новый storage owner пока не подключён. Codec36.1 опубликован отдельно; его parser body не меняется. Direct production callers для нового ImageTagStore/ImageTagTransaction не найдены. Planned integration ниже не выдаётся за выполненную.
 
 Исходная цепочка проверена по коду: AdminApi::mutate вызывает ResourceEngine::setTags; setTags под withLock пишет metadata.json и вызывает rebuildUnlocked. SharedGallery::scan в UI независимо читает этот sidecar. ResourceCollection::normalizeTags возвращает array_keys, что превращает numeric-looking tags в integers; при подключении требуется сохранение строк. ImageProcessor::thumbnail/optimize создают working WebP через writeWebp; новый tag action не должен запускать эти pixel encoders.

@@ -69,7 +69,8 @@ final class AdminApi
         } catch (InvalidArgumentException $error) {
             $this->responder->json(['ok' => false, 'error' => $error->getMessage()], 400);
         } catch (RuntimeException $error) {
-            $this->responder->json(['ok' => false, 'error' => $error->getMessage()], 422);
+            $status = $error->getCode() === ResourceEngine::TAG_FILTER_UNAVAILABLE ? ResourceEngine::TAG_FILTER_UNAVAILABLE : 422;
+            $this->responder->json(['ok' => false, 'error' => $error->getMessage()], $status);
         } catch (Throwable $error) {
             $this->internalFailure($error);
         }

@@ -8,14 +8,24 @@ use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
 
+require_once __DIR__ . '/ImageTagStore.php';
+
 /** Owns catalog, metadata, upload and derivative operations behind one resource contract. */
 final class ResourceEngine
 {
+    public const TAG_FILTER_UNAVAILABLE = 503;
+    private const TAG_CONFLICT = 409;
+    private const TAG = ['empty' => '', 'absent' => 'absent', 'embedded' => 'embedded', 'legacy' => 'legacy',
+        'unsupported' => 'unsupported', 'embedded_marker' => 'tags_embedded',
+        'add' => 'add', 'replace' => 'replace', 'recovery' => 'tag-recovery', 'failed' => 'Image tags are unavailable.'];
+    private const TAG_ERROR = ['tags' => null, 'tag_state' => 'error', 'tag_revision' => '', 'tag_editable' => false];
+    private const DELIVERY = ['original' => 'original', 'optimized' => 'optimized', 'resource' => 'resource', 'empty' => ''];
     private const RENAME_DERIVATIVE_VARIANTS = ['thumbnail', 'optimized'];
     private const REPLACEMENT = ['one' => 1, 'zero' => 0, 'revision_step' => 1,
         'random_bytes' => 8, 'prefix' => '.replace-', 'separator' => '-'];
     private EngineConfiguration $configuration;
     private ImageProcessor $imageProcessor;
+    private ?ImageTagStore $tagStore = null;
 
     public function __construct(EngineConfiguration $configuration, ImageProcessor $imageProcessor)
     {
@@ -24,6 +34,67 @@ final class ResourceEngine
     }
 
     public function configuration(): EngineConfiguration { return $this->configuration; }
+
+    /** The trusted collection and basename are already resolved; a single header read owns the file's tag state. */
+    public function tagState(ResourceCollection $collection, string $name, ?array $legacyEntry): array
+    {
+        try {
+            $mime = $collection->mimeForName($name);
+            if ($mime === null) return self::TAG_ERROR;
+            $state = $this->tagStore()->snapshot($this->sourceFile($collection, $name), $mime);
+            // Branch: embedded (including []) and parser errors never consult or normalize legacy data.
+            if ($state['tag_state'] !== self::TAG['absent']) return $state;
+            $legacy = $this->legacyTagValues($collection, $legacyEntry);
+            if ($legacy === null) return self::TAG_ERROR;
+            $state['tags'] = $legacy;
+            $state['tag_state'] = $legacy ? self::TAG['legacy'] : self::TAG['absent'];
+            return $state;
+        } catch (Throwable) { return self::TAG_ERROR; }
+    }
+
+    /** Metadata helpers are instantiated only for the new reader/writer, never hot binary lookup. */
+    private function tagStore(): ImageTagStore
+    {
+        return $this->tagStore ??= new ImageTagStore();
+    }
+
+    /** Historical sidecar tags keep collection defaults until the file owns an explicit set. */
+    private function legacyTagValues(ResourceCollection $collection, ?array $entry): ?array
+    {
+        if ($entry === null || ($entry[self::TAG['embedded_marker']] ?? false) === true) return null;
+        $tags = (array) ($entry['tags'] ?? []);
+        foreach ($tags as $tag) {
+            // Loop: historical scalars are allowed, but malformed structured tags cannot become guessed strings.
+            if (!is_scalar($tag)) return null;
+        }
+        return $collection->normalizeTags(array_merge($collection->defaultTags(), $tags));
+    }
+
+    /** Reads the selected sidecar once and retains its exact bytes for guarded mutation staging. */
+    private function tagMetadata(ResourceCollection $collection): array
+    {
+        $file = $collection->metadataFile();
+        if (!is_file($file)) return ['entries' => [], 'bytes' => null];
+        $bytes = @file_get_contents($file);
+        $decoded = is_string($bytes) ? json_decode($bytes, true) : null;
+        return ['entries' => is_array($decoded) ? $decoded : null, 'bytes' => is_string($bytes) ? $bytes : null];
+    }
+
+    /** Empty means the valid sidecar has no entry; null keeps corruption distinguishable. */
+    private function tagEntry(?array $metadata, string $id): ?array
+    {
+        $entry = $metadata === null ? null : (array_key_exists($id, $metadata) ? $metadata[$id] : []);
+        return is_array($entry) ? $entry : null;
+    }
+
+    /** Legacy list consumers keep their searchable sidecar set for codec-unsupported files, without advertising a file edit. */
+    public function tagFieldsForLegacyList(ResourceCollection $collection, string $name, ?array $legacy): array
+    {
+        $fields = $this->tagState($collection, $name, $legacy);
+        if ($fields['tag_state'] !== self::TAG['unsupported']) return $fields;
+        $tags = $this->legacyTagValues($collection, $legacy);
+        return $tags === null ? self::TAG_ERROR : array_replace($fields, ['tags' => $tags, 'tag_state' => self::TAG['legacy']]);
+    }
 
     /** Rebuilds one complete catalog from physical source files and stored tags. */
     public function rebuild(string $type): array
@@ -36,21 +107,21 @@ final class ResourceEngine
     public function list(string $type, array $tags = [], int $page = 1, int $pageSize = 0): array
     {
         $collection = $this->configuration->collection($type);
+        $existingCatalog = is_file($collection->catalogFile());
         $catalog = $this->loadCatalog($collection);
+        $records = (array) ($catalog['resources'] ?? []);
+        if ($existingCatalog) {
+            // Branch: live file tags can change without a generated catalog write; cold rebuild already read them.
+            $metadata = $this->tagMetadata($collection)['entries'];
+            foreach ($records as &$record) {
+                // Loop: the whole result set receives tag state before any AND filter or page slice.
+                $fields = $this->tagFieldsForLegacyList($collection, $record['name'], $this->tagEntry($metadata, $record['id']));
+                $record = array_replace($record, $fields);
+            }
+            unset($record);
+        }
         $requestedTags = $collection->normalizeTags($tags);
-        $records = array_values(array_filter((array) ($catalog['resources'] ?? []), static function (array $record) use ($requestedTags): bool {
-            if (!$requestedTags) {
-                return true;
-            }
-            $recordTags = array_fill_keys((array) ($record['tags'] ?? []), true);
-            foreach ($requestedTags as $tag) {
-                // Branch: the public filter contract requires every requested tag.
-                if (!isset($recordTags[$tag])) {
-                    return false;
-                }
-            }
-            return true;
-        }));
+        $records = $this->filterTagRecords($records, $requestedTags);
 
         $effectivePageSize = $pageSize > 0 ? $pageSize : $this->configuration->defaultPageSize();
         $effectivePageSize = min($effectivePageSize, $this->configuration->maximumPageSize());
@@ -58,6 +129,12 @@ final class ResourceEngine
         $pages = max(1, (int) ceil($total / $effectivePageSize));
         $effectivePage = max(1, min($pages, $page));
         $offset = ($effectivePage - 1) * $effectivePageSize;
+        $items = array_slice($records, $offset, $effectivePageSize);
+        foreach ($items as &$item) {
+            // Loop: only visible records need delivery versions, separate from the metadata editing revision.
+            $item['delivery_revisions'] = $this->deliveryRevisions($collection, $item);
+        }
+        unset($item);
 
         return [
             'ok' => true,
@@ -66,8 +143,37 @@ final class ResourceEngine
             'page_size' => $effectivePageSize,
             'pages' => $pages,
             'total' => $total,
-            'items' => array_slice($records, $offset, $effectivePageSize),
+            'items' => $items,
         ];
+    }
+
+    /** The list versions the same original or ready variant that the binary resolver will select. */
+    private function deliveryRevisions(ResourceCollection $collection, array $record): array
+    {
+        $source = $this->sourceFile($collection, $record['name']);
+        $original = ImageTagTransaction::revision($source);
+        $versions = [self::DELIVERY['original'] => $original];
+        foreach (self::RENAME_DERIVATIVE_VARIANTS as $variant) {
+            // Loop: a missing/stale variant uses the original identity until it has a current published file.
+            $path = $collection->derivedPath($record['id'], $variant);
+            $revision = $this->imageProcessor->isCurrent($source, $path) ? ImageTagTransaction::revision($path) : self::DELIVERY['empty'];
+            $versions[$variant] = $revision !== self::DELIVERY['empty'] ? $revision : $original;
+        }
+        $versions[self::DELIVERY['resource']] = $versions[self::DELIVERY['optimized']];
+        return $versions;
+    }
+
+    /** A filtered result cannot claim a complete total while some file tag sets are unknown. */
+    private function filterTagRecords(array $records, array $tags): array
+    {
+        if (!$tags) return $records;
+        foreach ($records as $record) {
+            // Loop: unknown records are retained unfiltered and are never silently counted as nonmatches.
+            if (!is_array($record['tags'] ?? null)) {
+                throw new RuntimeException('Image tag metadata is incomplete.', self::TAG_FILTER_UNAVAILABLE);
+            }
+        }
+        return array_values(array_filter($records, static fn (array $record): bool => !array_diff($tags, $record['tags'])));
     }
 
     /** Resolves one opaque id to a stream descriptor for the requested variant. */
@@ -109,22 +215,112 @@ final class ResourceEngine
             'name' => $downloadName,
             'modified' => (int) filemtime($selectedFile),
             'bytes' => (int) filesize($selectedFile),
+            'revision' => ImageTagTransaction::revision($selectedFile),
         ];
     }
 
-    /** Saves canonical tags and regenerates the public catalog atomically. */
+    /** Keeps the existing admin action; unsupported formats retain their legacy sidecar behavior. */
     public function setTags(string $type, string $resourceId, array $tags): array
+    {
+        return $this->changeTags($type, $resourceId, $tags, self::TAG['replace'], null, true);
+    }
+
+    /** New callers use a fresh union or an exact replacement bound to the revision they displayed. */
+    public function updateTags(string $type, string $resourceId, array $tags, string $operation, ?string $expectedRevision): array
+    {
+        if (!in_array($operation, [self::TAG['add'], self::TAG['replace']], true)
+            || $operation === self::TAG['replace'] && ($expectedRevision === null || $expectedRevision === self::TAG['empty'])) {
+            throw new InvalidArgumentException(self::TAG['failed']);
+        }
+        return $this->changeTags($type, $resourceId, $tags, $operation, $expectedRevision, false);
+    }
+
+    /** Resolves the selected id again inside the existing collection mutation lock. */
+    private function changeTags(string $type, string $resourceId, array $tags, string $operation,
+        ?string $expectedRevision, bool $allowLegacy): array
     {
         $collection = $this->configuration->collection($type);
         $this->loadCatalog($collection);
-        return $this->withLock($collection, function () use ($collection, $resourceId, $tags): array {
+        return $this->withLock($collection, function () use ($collection, $resourceId, $tags, $operation, $expectedRevision, $allowLegacy): array {
             $catalog = $this->readJson($collection->catalogFile());
-            $this->recordFromCatalog($catalog, $resourceId);
-            $metadata = $this->loadMetadata($collection);
-            $metadata[$resourceId] = ['tags' => $collection->normalizeTags($tags)];
-            $this->writeJson($collection->metadataFile(), $metadata);
-            return $this->rebuildUnlocked($collection);
+            $record = $this->recordFromCatalog($catalog, $resourceId);
+            return $this->writeTagUpdate($collection, $record, $tags, $operation, $expectedRevision, $allowLegacy);
         });
+    }
+
+    /** Stages only the selected source, current cached variants and its sidecar entry. */
+    private function writeTagUpdate(ResourceCollection $collection, array $record, array $tags, string $operation,
+        ?string $expectedRevision, bool $allowLegacy): array
+    {
+        $sidecar = $this->tagMetadata($collection);
+        $metadata = $sidecar['entries'];
+        $id = $record['id']; $name = $record['name'];
+        $legacy = $this->tagEntry($metadata, $id);
+        if ($legacy === null) throw new RuntimeException(self::TAG['failed']);
+        $state = $this->tagState($collection, $name, $legacy);
+        if ($expectedRevision !== null && $operation === self::TAG['replace'] && !hash_equals($state['tag_revision'], $expectedRevision)) {
+            // Branch: a removed, replaced or newly unreadable source cannot satisfy a displayed revision.
+            throw new RuntimeException('Image changed during metadata editing.', self::TAG_CONFLICT);
+        }
+        $recovery = $collection->runtimeDirectory() . DIRECTORY_SEPARATOR . self::TAG['recovery'];
+        $legacyOnly = !$state['tag_editable'] && in_array($state['tag_state'],
+            [self::TAG['unsupported'], self::TAG['legacy'], self::TAG['absent']], true);
+        if ($allowLegacy && $legacyOnly) {
+            // Branch: existing admin retains sidecar editing only for known untagged/read-only or unsupported formats.
+            $legacy['tags'] = $collection->normalizeTags($tags);
+            unset($legacy[self::TAG['embedded_marker']]);
+            $transaction = new ImageTagTransaction($recovery);
+        } else {
+            // Branch: the new file mutation requires a known writable state and leaves other entry fields intact.
+            if (!$state['tag_editable']) throw new RuntimeException(self::TAG['failed']);
+            $source = $this->sourceFile($collection, $name);
+            $variants = $this->currentTagVariants($collection, $source, $id);
+            // Branch: old setTags retains its effective collection defaults; the new writer is exact.
+            $requested = $allowLegacy ? $collection->normalizeTags(array_merge($collection->defaultTags(), $tags)) : $tags;
+            $prepared = $this->tagStore()->prepare($source, $collection->mimeForName($name), $requested, $operation,
+                $state['tags'], $expectedRevision, $recovery, $variants);
+            $transaction = $prepared['transaction'];
+            unset($legacy['tags']);
+            $legacy[self::TAG['embedded_marker']] = true;
+        }
+        $metadata[$id] = $legacy;
+        return $this->publishTagUpdate($collection, $transaction, $metadata, $sidecar['bytes']);
+    }
+
+    /** Selects only existing variants that already correspond to this source; no derivative is generated by a tag action. */
+    private function currentTagVariants(ResourceCollection $collection, string $source, string $id): array
+    {
+        $variants = [];
+        foreach (self::RENAME_DERIVATIVE_VARIANTS as $variant) {
+            // Loop: the processor's existing freshness rule selects its own exact cached file.
+            $path = $collection->derivedPath($id, $variant);
+            if ($this->imageProcessor->isCurrent($source, $path)) $variants[] = $path;
+        }
+        return $variants;
+    }
+
+    /** The two catalog artifacts join the same recovery boundary as the selected metadata edit. */
+    private function publishTagUpdate(ResourceCollection $collection, ImageTagTransaction $transaction,
+        array $metadata, ?string $previousSidecar): array
+    {
+        try {
+            $transaction->stage($collection->metadataFile(), $previousSidecar, $this->jsonText($metadata));
+            $transaction->install();
+            $catalog = $this->compileCatalog($collection, $metadata);
+            foreach ($this->catalogArtifacts($collection, $catalog) as $path => $bytes) {
+                // Loop: exact prepublication catalog bytes remain recoverable if either artifact cannot be installed.
+                $before = is_file($path) ? @file_get_contents($path) : null;
+                if ($before === false) throw new RuntimeException(self::TAG['failed']);
+                $transaction->stage($path, $before, $bytes);
+            }
+            $transaction->install();
+            $transaction->commit();
+            return $catalog;
+        } catch (Throwable $error) {
+            // Recovery: only matching installed bytes are rolled back; newer external bytes are never erased.
+            $transaction->rollback();
+            throw $error;
+        }
     }
 
     /** Creates a non-destructive optimized WebP for one opaque resource id. */
@@ -238,6 +434,7 @@ final class ResourceEngine
         $metadataBefore = $this->loadMetadata($collection);
         $metadata = $metadataBefore;
         $id = $collection->resourceId($name);
+        $this->prepareReplacementTags($collection, $record['name'], $name, $staged, $this->tagEntry($metadata, $resourceId));
         $revision = max(time(), (int) filemtime($source) + self::REPLACEMENT['revision_step']);
         if (!rename($source, $recovery)) throw new RuntimeException('Unable to preserve previous resource.');
         $installed = false;
@@ -263,6 +460,28 @@ final class ResourceEngine
             foreach (self::RENAME_DERIVATIVE_VARIANTS as $variant) @unlink($collection->derivedPath($retiredId, $variant));
         }
         return ['replaced' => $name, 'previous_name' => (string) $record['name'], 'id' => $id, 'catalog' => $catalog];
+    }
+
+    /** A previously embedded set is carried only by its own metadata block in the unpublished upload. */
+    private function prepareReplacementTags(ResourceCollection $collection, string $oldName, string $newName,
+        string $staged, ?array $legacy): void
+    {
+        $previous = $this->tagState($collection, $oldName, $legacy);
+        // Branch: historical sidecar replacement and an already tagged incoming file keep their exact input bytes.
+        if ($previous['tag_state'] !== self::TAG['embedded']) return;
+        $mime = $collection->mimeForName($newName);
+        $incoming = $this->tagStore()->snapshot($staged, $mime);
+        if ($incoming['tag_state'] === self::TAG['embedded']) return;
+        if ($incoming['tag_state'] !== self::TAG['absent'] || !$incoming['tag_editable']) {
+            // Branch: refuse before moving the selected source if carrying its metadata would be unsafe.
+            throw new InvalidArgumentException('Replacement cannot preserve the image tags.');
+        }
+        $recovery = $collection->runtimeDirectory() . DIRECTORY_SEPARATOR . self::TAG['recovery'];
+        $prepared = $this->tagStore()->prepare($staged, $mime, $previous['tags'], self::TAG['replace'],
+            [], $incoming['tag_revision'], $recovery);
+        $transaction = $prepared['transaction'];
+        try { $transaction->install(); $transaction->commit(); }
+        catch (Throwable $error) { $transaction->rollback(); throw $error; }
     }
 
     /** Renames one catalog-owned resource while preserving its tags and generated derivatives. */
@@ -423,7 +642,17 @@ final class ResourceEngine
     {
         $this->assertSourceDirectory($collection);
         $this->ensureRuntimeDirectories($collection);
-        $metadata = $this->loadMetadata($collection);
+        $catalog = $this->compileCatalog($collection, $this->tagMetadata($collection)['entries']);
+        foreach ($this->catalogArtifacts($collection, $catalog) as $path => $bytes) {
+            // Loop: ordinary rebuild retains the existing atomic-per-file publication policy.
+            $this->writeText($path, $bytes);
+        }
+        return $catalog;
+    }
+
+    /** Catalog construction is separate from publication so a tag transaction can stage both exact artifacts. */
+    private function compileCatalog(ResourceCollection $collection, ?array $metadata): array
+    {
         $resources = [];
         foreach (new DirectoryIterator($collection->sourceDirectory()) as $entry) {
             // Loop: generated folders and unsupported files never enter the public resource contract.
@@ -434,12 +663,11 @@ final class ResourceEngine
             $resourceId = $collection->resourceId($name);
             $sourceFile = $entry->getPathname();
             $dimensions = $this->imageProcessor->inspect($sourceFile);
-            $resourceTags = array_merge($collection->defaultTags(), (array) ($metadata[$resourceId]['tags'] ?? []));
+            $fields = $this->tagFieldsForLegacyList($collection, $name, $this->tagEntry($metadata, $resourceId));
             $resources[] = [
                 'id' => $resourceId,
                 'type' => $collection->id(),
                 'name' => $name,
-                'tags' => $collection->normalizeTags($resourceTags),
                 'mime' => (string) $collection->mimeForName($name),
                 'width' => $dimensions['width'],
                 'height' => $dimensions['height'],
@@ -447,22 +675,26 @@ final class ResourceEngine
                 'modified' => (int) $entry->getMTime(),
                 'has_thumbnail' => $this->imageProcessor->isCurrent($sourceFile, $collection->derivedPath($resourceId, 'thumbnail')),
                 'has_optimized' => $this->imageProcessor->isCurrent($sourceFile, $collection->derivedPath($resourceId, 'optimized')),
-            ];
+            ] + $fields;
         }
         $resources = $this->sortNewestFirst($resources);
 
-        $catalog = [
+        return [
             'version' => 1,
             'type' => $collection->id(),
             'generated_at' => gmdate(DATE_ATOM),
             'total' => count($resources),
             'resources' => $resources,
         ];
-        $this->writeJson($collection->catalogFile(), $catalog);
+    }
+
+    /** The JSON and classic script representations always serialize the same catalog. */
+    private function catalogArtifacts(ResourceCollection $collection, array $catalog): array
+    {
         $script = 'window[' . $this->json($this->configuration->catalogGlobalKey()) . '] = Object.freeze('
             . $this->json($catalog, JSON_PRETTY_PRINT) . ");\n";
-        $this->writeText($collection->catalogScriptFile(), $script);
-        return $catalog;
+        return [$collection->catalogFile() => $this->jsonText($catalog),
+            $collection->catalogScriptFile() => $script];
     }
 
     /** Orders every catalog page by source modification time and keeps equal timestamps deterministic. */
@@ -583,19 +815,7 @@ final class ResourceEngine
     private function withLock(ResourceCollection $collection, callable $operation): array
     {
         $this->ensureRuntimeDirectories($collection);
-        $lockHandle = fopen($collection->lockFile(), 'c+');
-        if ($lockHandle === false || !flock($lockHandle, LOCK_EX)) {
-            if (is_resource($lockHandle)) {
-                fclose($lockHandle);
-            }
-            throw new RuntimeException('Unable to lock the resource engine.');
-        }
-        try {
-            return $operation();
-        } finally {
-            flock($lockHandle, LOCK_UN);
-            fclose($lockHandle);
-        }
+        return $collection->withMutationLock($operation);
     }
 
     /** Reads server-only tags while accepting an empty first-run state. */
@@ -641,8 +861,11 @@ final class ResourceEngine
 
     private function writeJson(string $file, array $value): void
     {
-        $this->writeText($file, $this->json($value, JSON_PRETTY_PRINT) . "\n");
+        $this->writeText($file, $this->jsonText($value));
     }
+
+    /** Generated JSON retains the existing line ending and serialization options. */
+    private function jsonText(array $value): string { return $this->json($value, JSON_PRETTY_PRINT) . "\n"; }
 
     /** Atomically replaces one generated text artifact. */
     private function writeText(string $file, string $source): void

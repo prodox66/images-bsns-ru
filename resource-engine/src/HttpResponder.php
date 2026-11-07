@@ -45,7 +45,7 @@ final class HttpResponder
     {
         $modified = (int) $descriptor['modified'];
         $bytes = (int) $descriptor['bytes'];
-        $entityTag = '"' . hash('sha256', $modified . ':' . $bytes . ':' . (string) $descriptor['name']) . '"';
+        $entityTag = $this->entityTag($descriptor);
         $requestEntityTag = trim((string) ($_SERVER['HTTP_IF_NONE_MATCH'] ?? ''));
 
         // Branch: a matching browser cache validator needs no resource body.
@@ -63,6 +63,16 @@ final class HttpResponder
         header('ETag: ' . $entityTag);
         readfile((string) $descriptor['path']);
         exit;
+    }
+
+    /** A versioned selected file cannot reuse the ETag of equal-sized bytes with the same mtime. */
+    private function entityTag(array $descriptor): string
+    {
+        $seed = (int) $descriptor['modified'] . ':' . (int) $descriptor['bytes'] . ':' . (string) $descriptor['name'];
+        $revision = $descriptor['revision'] ?? null;
+        // Branch: portable callers that do not supply a version keep their previous validator.
+        if (is_string($revision) && $revision !== '') $seed .= ':' . $revision;
+        return '"' . hash('sha256', $seed) . '"';
     }
 
     /** Completes a preflight request without entering any application operation. */

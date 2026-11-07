@@ -4,10 +4,15 @@ declare(strict_types=1);
 namespace Bzn\ResourceEngine;
 
 use InvalidArgumentException;
+use RuntimeException;
 
 /** Owns every filesystem and image-processing rule for one logical resource type. */
 final class ResourceCollection
 {
+    private const MUTATION_LOCK_MODE = 'c+';
+    private const RUNTIME_DIRECTORY_MODE = 0755;
+    private const TAG_KEY_PREFIX = 'tag:';
+    private bool $mutationLocked = false;
     private string $id;
     private string $label;
     private string $sourceDirectory;
@@ -71,6 +76,31 @@ final class ResourceCollection
     }
     public function trashDirectory(): string { return $this->runtimeDirectory . DIRECTORY_SEPARATOR . 'trash'; }
     public function defaultTags(): array { return $this->defaultTags; }
+
+    /** The same collection lock serializes source mutations and publication of new derivatives. */
+    public function withMutationLock(callable $operation): mixed
+    {
+        // Branch: a synchronous caller already holding this collection's lock must not take a second flock.
+        if ($this->mutationLocked) return $operation();
+        $runtime = $this->runtimeDirectory();
+        if (!is_dir($runtime) && !mkdir($runtime, self::RUNTIME_DIRECTORY_MODE, true) && !is_dir($runtime)) {
+            throw new RuntimeException('Unable to create resource engine directory.');
+        }
+        $handle = fopen($this->lockFile(), self::MUTATION_LOCK_MODE);
+        if ($handle === false || !flock($handle, LOCK_EX)) {
+            // Branch: a failed acquisition must release its handle without running the operation.
+            if (is_resource($handle)) fclose($handle);
+            throw new RuntimeException('Unable to lock the resource engine.');
+        }
+        $this->mutationLocked = true;
+        try { return $operation(); }
+        finally {
+            // Completed boundary: exceptions release the very same lock before another caller can proceed.
+            $this->mutationLocked = false;
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
     public function thumbnailMaximumWidth(): int { return $this->thumbnailMaximumWidth; }
     public function thumbnailMaximumHeight(): int { return $this->thumbnailMaximumHeight; }
     public function thumbnailQuality(): int { return $this->thumbnailQuality; }
@@ -143,10 +173,11 @@ final class ResourceCollection
             $rawValue = trim((string) $tag);
             $value = function_exists('mb_strtolower') ? mb_strtolower($rawValue, 'UTF-8') : strtolower($rawValue);
             if ($value !== '') {
-                $normalized[$value] = true;
+                // Branch: a numeric tag is still a string; only the private deduplication key gets a prefix.
+                $normalized[self::TAG_KEY_PREFIX . $value] = $value;
             }
         }
-        $result = array_keys($normalized);
+        $result = array_values($normalized);
         sort($result, SORT_NATURAL | SORT_FLAG_CASE);
         return $result;
     }
