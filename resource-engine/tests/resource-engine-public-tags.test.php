@@ -139,6 +139,17 @@ namespace {
             $this->rejects(fn () => $edit(ImageTagStore::SELECTED_ADD, $newRevision, ['stale']), self::C['conflict']);
             $edit(self::C['add'], $selected, ['legacy-add']);
             $this->check($this->codec->readFile($path) === ['fresh', 'legacy-add', 'replacement'], 'The ordinary fresh ADD changed semantics.');
+            $plainName = 'plain-guard.png'; $plainPath = $this->collection->sourceDirectory() . '/' . $plainName;
+            $plain = $this->png(); file_put_contents($plainPath, $plain);
+            $plainRevision = ImageTagTransaction::revision($plainPath);
+            $index = file_get_contents($this->collection->catalogFile());
+            $rejected = false;
+            try {
+                $this->engine->updateTagsWithPublicAliases(self::C['type'], $this->collection->resourceId($plainName), ['   '],
+                    ImageTagStore::SELECTED_ADD, $plainRevision, $guard);
+            } catch (\InvalidArgumentException) { $rejected = true; }
+            $this->check($rejected && file_get_contents($plainPath) === $plain && ImageTagTransaction::revision($plainPath) === $plainRevision
+                && file_get_contents($this->collection->catalogFile()) === $index, 'A blank selected delta embedded an empty set or changed the catalog.');
         }
 
         private function files(): array

@@ -280,6 +280,8 @@ final class ImageTagStore
         }
         $before = $this->bytes($path); $current = $this->reader->read($before);
         $requested = $this->writer->normalize($tags);
+        // Branch: a selected addition with no actual values must not create an embedded empty set.
+        if ($operation === self::SELECTED_ADD && !$requested) throw new InvalidArgumentException(self::C['failed']);
         // Branch: ADD uses the freshly read complete set; REPLACE and explicit clear do not inherit any fallback.
         $wanted = $operation !== self::C['replace'] ? $this->writer->normalize(array_values(array_unique(array_merge(
             $current ?? $this->legacy($legacy), $requested), SORT_STRING))) : $requested;
