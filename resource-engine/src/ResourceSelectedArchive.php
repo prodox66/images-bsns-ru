@@ -25,7 +25,7 @@ final class ResourceSelectedArchive
     public function __construct(private readonly ResourceCollection $collection, private readonly ImageTagStore $tagStore) {}
 
     /** Records a canonical selected file without mutating the archive or the live directory. */
-    public function expect(string $path, ?string $revision = null, bool $optional = false, ?string $digest = null): void
+    public function expect(string $path, ?string $revision = null, bool $optional = false, ?string $digest = null, ?string $source = null): void
     {
         if (isset($this->files[$path]) || isset($this->missing[$path])) throw $this->conflict();
         $parent = dirname($path); $canonical = @realpath($parent);
@@ -41,7 +41,8 @@ final class ResourceSelectedArchive
             || !$this->matchesDigest($path, $state, $digest)) {
             throw $this->conflict();
         }
-        $this->files[$path] = ['before' => $state, 'digest' => $digest, 'slot' => self::C['slot'] . count($this->files)];
+        $this->files[$path] = ['before' => $state, 'digest' => $digest, 'source' => $source ?? $path,
+            'slot' => self::C['slot'] . count($this->files)];
     }
 
     /** Missing public aliases cannot be replaced with an unverified file between proof and planning. */
@@ -92,23 +93,86 @@ final class ResourceSelectedArchive
         return $proofs;
     }
 
-    /** Recovery never overwrites a file that arrived independently after the move. */
-    public function rollback(): void
+    /** Restores only proven families; a replacement at the source leaves old variants in recovery. */
+    public function rollback(): array
     {
         if ($this->directory !== null && @realpath($this->directory) !== $this->directory) throw new RuntimeException(self::C['failed']);
-        $unrestored = false;
-        foreach (array_reverse($this->moved, true) as $path => $record) {
-            // Loop: a no-clobber hardlink restores the same inode and its original aliases when the slot is still vacant.
-            $backup = $record['backup']; $state = $this->fileState($backup);
-            if ($state === null || @realpath($backup) !== $backup || $record['identity'] === null || $this->identity($state) !== $record['identity']
-                || @realpath(dirname($path)) !== dirname($path) || !$this->absent($path) || !@link($backup, $path)) {
-                $unrestored = true; continue;
-            }
-            // Branch: if removing our duplicate fails, leave recovery intact and never undo the restored source.
-            if (!@unlink($backup)) $unrestored = true;
+        $families = []; $partial = false; $replacements = [];
+        foreach ($this->moved as $path => $record) {
+            // Loop: restoring a cache may not be separated from its original source's admission.
+            $families[$this->files[$path]['source']][$path] = $record;
         }
-        if ($unrestored) throw new RuntimeException(self::C['failed']);
-        $this->discardEmptyDirectory();
+        foreach ($families as $source => $files) {
+            // Loop: another family's conflicting source cannot prevent this exact original from returning.
+            $result = $this->restoreFamily($source, $files);
+            $partial = $partial || !$result['complete'];
+            if ($result['replacement'] !== null) $replacements[$source] = $result['replacement'];
+        }
+        if (!$partial) $this->discardEmptyDirectory();
+        return ['partial' => $partial, 'replacements' => $replacements];
+    }
+
+    /** Keep backup links until a restored original proves that returning its caches is still safe. */
+    private function restoreFamily(string $source, array $files): array
+    {
+        $original = $files[$source] ?? null;
+        if ($original === null || !$this->restoreLink($source, $original)) {
+            return ['complete' => false, 'replacement' => $this->replacementRevision($source, $original)];
+        }
+        // Branch: a file that arrived during rename is restored as-is, but never inherits the selected original's caches or tags.
+        if ($original['identity'] !== $original['selected_identity']) {
+            $replacement = ImageTagTransaction::revision($source) ?: null;
+            if ($this->ownsLiveLink($source, $original)) @unlink($original['backup']);
+            return ['complete' => false, 'replacement' => $replacement];
+        }
+        $installed = [$source => $original];
+        foreach (array_diff_key($files, $installed) as $path => $record) {
+            // Loop: even a late replacement of a just-restored source prevents further old cache publication.
+            if (!$this->ownsLiveLink($source, $original)) break;
+            if ($this->restoreLink($path, $record)) $installed[$path] = $record;
+        }
+        if (!$this->ownsLiveLink($source, $original)) {
+            foreach (array_diff_key($installed, [$source => true]) as $path => $record) {
+                // Loop: retire only a link this attempt installed, retaining all of its private backups.
+                if ($this->ownsLiveLink($path, $record)) @unlink($path);
+            }
+            return ['complete' => false, 'replacement' => $this->replacementRevision($source, $original)];
+        }
+        $complete = count($installed) === count($files);
+        foreach ($installed as $path => $record) {
+            // Loop: retire a recovery link only when the same inode is back at the intended live path.
+            if (!$this->ownsLiveLink($path, $record) || !@unlink($record['backup'])) $complete = false;
+        }
+        return ['complete' => $complete, 'replacement' => null];
+    }
+
+    /** A no-clobber link restores the exact inode into a canonical vacant slot. */
+    private function restoreLink(string $path, array $record): bool
+    {
+        return $this->matchesRestoration($record['backup'], $record)
+            && @realpath(dirname($path)) === dirname($path) && $this->absent($path) && @link($record['backup'], $path);
+    }
+
+    /** The live file and its still-held private backup must both name the planned inode. */
+    private function ownsLiveLink(string $path, array $record): bool
+    { return $this->matchesRestoration($path, $record) && $this->matchesRestoration($record['backup'], $record); }
+
+    /** Restoring sibling links changes their link count without changing the selected bytes or identity. */
+    private function matchesRestoration(string $path, array $record): bool
+    {
+        $state = $this->fileState($path); $expected = $record['identity'];
+        if ($state === null || $expected === null || @realpath($path) !== $path) return false;
+        $actual = $this->identity($state);
+        unset($actual['nlink'], $expected['nlink']);
+        return $actual === $expected;
+    }
+
+    /** Only a proven independently arrived regular source can retire that family's legacy sidecar entry. */
+    private function replacementRevision(string $source, ?array $original): ?string
+    {
+        if ($original === null || !$this->matchesRestoration($original['backup'], $original)
+            || $this->matchesRestoration($source, $original) || @realpath($source) !== $source) return null;
+        return ImageTagTransaction::revision($source) ?: null;
     }
 
     /** Binds each move to its last observed inode state, including intentional moves of a sibling hardlink. */
@@ -122,7 +186,8 @@ final class ResourceSelectedArchive
         if (!@rename($path, $backup)) throw new RuntimeException(self::C['failed']);
         $observed = $this->fileState($backup);
         // Branch: remember the actual moved entry for conservative recovery, even if an external writer raced this move.
-        $this->moved[$path] = ['backup' => $backup, 'identity' => $observed === null ? null : $this->identity($observed)];
+        $this->moved[$path] = ['backup' => $backup, 'identity' => $observed === null ? null : $this->identity($observed),
+            'selected_identity' => $this->identity($before)];
         if ($observed === null || $this->identity($observed) !== $this->identity($before)) throw $this->conflict();
         $this->inodeStates[$inode] = $observed;
     }

@@ -405,8 +405,11 @@ final class ResourceEngine
     private function verifyUnchangedTagTargets(array $unchanged, array $missing): void
     {
         foreach ($unchanged as $path => $proof) {
-            // Loop: even an in-place change with the same stat cannot become part of the just-committed edit.
-            if (!$this->tagStore()->unchangedMatches($path, $proof)) throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
+            // Loop: copied bytes retain their digest; a recovery repair also checks the exact replacement source revision.
+            $matches = $proof['digest'] === null
+                ? hash_equals($proof['revision'], ImageTagTransaction::revision($path))
+                : $this->tagStore()->unchangedMatches($path, $proof);
+            if (!$matches) throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
         }
         foreach ($missing as $path) {
             // Loop: metadata editing does not create absent variants or adopt a concurrently published alias.
@@ -441,7 +444,13 @@ final class ResourceEngine
                 $this->publishTagUpdate($collection, $transaction, $metadata, $sidecar['bytes'], $archive->archiveProofs(), $archive->removedPaths());
             } catch (Throwable $error) {
                 // Recovery: the catalog transaction has its own rollback; restore only the still-owned archived files here.
-                $archive->rollback();
+                $restored = $archive->rollback();
+                if ($restored['replacements']) {
+                    // Branch: an archived original's old sidecar cannot describe a different file under the same ID.
+                    $this->retireArchiveReplacementMetadata($collection, $items, $sidecar['bytes'], $restored['replacements']);
+                    throw new RuntimeException(self::ARCHIVE['failed'], self::TAG_CONFLICT, $error);
+                }
+                if ($restored['partial']) throw new RuntimeException(self::ARCHIVE['failed'], previous: $error);
                 throw $error;
             }
             return ['items' => $items];
@@ -478,13 +487,44 @@ final class ResourceEngine
             // Loop: an older runtime cache belongs to the same ID even when it was never published as a public alias.
             $path = $collection->derivedPath($id, $variant); $runtimePaths[$path] = true;
             $entry = $proof['files'][$path] ?? null;
-            $archive->expect($path, $entry['revision'] ?? null, $entry === null, $entry['digest'] ?? null);
+            $archive->expect($path, $entry['revision'] ?? null, $entry === null, $entry['digest'] ?? null, $source);
         }
         foreach ($proof['files'] as $path => $entry) {
             // Loop: the runtime counterpart has already been planned; add only the verified public path.
-            if (!isset($runtimePaths[$path])) $archive->expect($path, $entry['revision'], false, $entry['digest']);
+            if (!isset($runtimePaths[$path])) $archive->expect($path, $entry['revision'], false, $entry['digest'], $source);
         }
         foreach ($proof['missing'] as $path) $archive->expectMissing($path);
+    }
+
+    /** Only exact replacement families lose old legacy metadata; selected recovery retains the old entry. */
+    private function retireArchiveReplacementMetadata(ResourceCollection $collection, array $items, ?string $previous, array $replacements): void
+    {
+        $sidecar = $this->tagMetadata($collection); $metadata = $sidecar['entries'];
+        if ($metadata === null || $sidecar['bytes'] !== $previous) throw new RuntimeException(self::ARCHIVE['failed'], self::TAG_CONFLICT);
+        $proofs = [];
+        foreach ($items as $item) {
+            // Loop: a restored family keeps its old tags; an independently replaced original must keep its own.
+            $source = $this->sourceFile($collection, $item['name']);
+            if (!isset($replacements[$source])) continue;
+            $proofs[$source] = ['revision' => $replacements[$source], 'digest' => null];
+            unset($metadata[$item['id']]);
+        }
+        $this->verifyUnchangedTagTargets($proofs, []);
+        $recovery = $collection->runtimeDirectory() . DIRECTORY_SEPARATOR . self::TAG['recovery'];
+        $transaction = new ImageTagTransaction($recovery);
+        $clean = $this->jsonText($metadata);
+        try {
+            // Branch: the old sidecar belongs to a now-archived inode; retire it even if a derived catalog cannot be repaired.
+            $transaction->stage($collection->metadataFile(), $sidecar['bytes'], $clean);
+            $transaction->install();
+            $this->verifyUnchangedTagTargets($proofs, []);
+            $transaction->commit();
+        } catch (Throwable $error) {
+            $transaction->rollback();
+            throw $error;
+        }
+        // Completed boundary: a catalog failure can no longer reattach the archived original's legacy tags.
+        $this->publishTagUpdate($collection, new ImageTagTransaction($recovery), $metadata, $clean, $proofs, []);
     }
 
     /** Creates a non-destructive optimized WebP for one opaque resource id. */

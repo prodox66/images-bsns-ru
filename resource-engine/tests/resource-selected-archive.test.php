@@ -168,6 +168,53 @@ final class SelectedResourceArchiveContract
         file_put_contents($path, $before[$path]); touch($path, $mtime);
     }
 
+    /** A new source at the old name keeps its own data, without the archived source's aliases or sidecar. */
+    private function occupiedRecovery(bool $denyDerived): void
+    {
+        $source = $this->path(self::C['first']); $other = $this->path(self::C['second']);
+        $old = file_get_contents($source); $second = file_get_contents($other); $mtime = filemtime($source);
+        $replacement = $this->raster(true); $variants = [...array_values($this->variants), ...array_values($this->aliases)];
+        $previous = array_combine($variants, array_map('file_get_contents', $variants));
+        $selection = $this->pair(); $metadata = $this->collection->metadataFile(); $inserted = false; $status = null;
+        $script = $this->collection->catalogScriptFile(); $foreignPath = $this->root . '/foreign-catalog.txt';
+        $foreign = 'not an engine artifact';
+        if ($denyDerived) {
+            // Branch: both the original transaction and its catalog repair must fail persistently.
+            file_put_contents($foreignPath, $foreign); unlink($script); symlink($foreignPath, $script);
+        }
+        $GLOBALS['bznArchiveAfterHash'] = static function (string $candidate) use ($metadata, $source, $replacement, $mtime, &$inserted): void {
+            if ($candidate !== $metadata || $inserted || file_exists($source)) return;
+            $inserted = true; file_put_contents($source, $replacement); touch($source, $mtime);
+        };
+        try { $this->archive($selection); }
+        catch (RuntimeException $error) { $status = $error->getCode(); }
+        finally { unset($GLOBALS['bznArchiveAfterHash']); }
+        $this->check($inserted && ($denyDerived ? $status !== null : $status === self::C['conflict']) && file_get_contents($source) === $replacement
+            && file_get_contents($other) === $second && !array_filter(array_map('file_exists', $variants)),
+            'A replacement source inherited old variants, or another selected family was not restored.');
+        $archive = $this->savedDirectories()[self::C['zero']] ?? '';
+        $journal = json_decode(file_get_contents($archive . '/restore.json'), true, flags: JSON_THROW_ON_ERROR);
+        $this->check(file_get_contents($archive . '/' . $journal['locations'][$source]) === $old
+            && $journal['records'][self::C['zero']]['metadata']['tags'] === ['keep for restore'], 'The old source family or tags were lost.');
+        foreach ($previous as $path => $bytes) {
+            // Loop: obsolete public aliases remain private when the selected original could not be restored.
+            $this->check(file_get_contents($archive . '/' . $journal['locations'][$path]) === $bytes, 'Old cache did not stay in recovery.');
+        }
+        $id = $selection[self::C['zero']]['id'];
+        $currentTags = json_decode(file_get_contents($metadata), true, flags: JSON_THROW_ON_ERROR);
+        $this->check(!isset($currentTags[$id]) && $currentTags[$this->collection->resourceId(self::C['neighbor'])]['tags'] === ['neighbor'],
+            'The replacement inherited legacy tags or changed the neighbor.');
+        $direct = $this->engine->tagFieldsForLegacyList($this->collection, self::C['first'], $currentTags[$id] ?? []);
+        $rows = array_column($this->engine->list(self::C['type'])['items'], null, 'id');
+        $this->check($direct['tags'] === [] && $rows[$id]['tags'] === [] && (!$denyDerived
+            || is_link($script) && file_get_contents($foreignPath) === $foreign), 'A derived catalog failure reattached stale legacy tags.');
+        foreach (['original', 'resource'] as $kind) {
+            // Loop: the actual original and preferred resource must resolve to the same new physical version.
+            $descriptor = $this->engine->resource(self::C['type'], $id, $kind);
+            $this->check(file_get_contents($descriptor['path']) === $replacement, 'The resource route returned the old cache for the new source.');
+        }
+    }
+
     /** Successful archiving retains exact bytes, one recovery manifest and unrelated data. */
     private function success(): void
     {
@@ -192,10 +239,11 @@ final class SelectedResourceArchiveContract
             'Archive dropped unrelated data or retained selected legacy tags on a reusable name.');
     }
 
-    public function run(): void
+    public function run(?bool $denyDerived = null): void
     {
         try {
-            $this->stale(); $this->recovery(); $this->copyDrift(false); $this->copyDrift(true); $this->success();
+            if ($denyDerived !== null) $this->occupiedRecovery($denyDerived);
+            else { $this->stale(); $this->recovery(); $this->copyDrift(false); $this->copyDrift(true); $this->success(); }
             echo 'PASS protected common archive: ' . $this->checks . ' actual assertions.' . PHP_EOL;
         } finally {
             // Cleanup: only the exact generated fixture and no symlink traversal.
@@ -211,4 +259,6 @@ final class SelectedResourceArchiveContract
 }
 
 (new SelectedResourceArchiveContract())->run();
+(new SelectedResourceArchiveContract())->run(false);
+(new SelectedResourceArchiveContract())->run(true);
 }
