@@ -124,8 +124,19 @@ final class ImageTags
     /** Index rebuilding reads chunk headers and owned metadata, never the skipped image/mask chunks. */
     public function readFile(string $file): ?array { return $this->readSource(new ImageTagSource(null, $file, $this->maximumBytes)); }
 
+    /** An adapter receives actual write admission from the same bounded parser, without duplicating format rules. */
+    public function fileState(string $file, ?int $maximumWriteBytes = null): array
+    {
+        $writeLimit = $maximumWriteBytes ?? $this->maximumBytes;
+        if ($writeLimit <= self::C['zero'] || $writeLimit > $this->maximumBytes) throw new InvalidArgumentException(self::C['metadata_error']);
+        return $this->readStateSource(new ImageTagSource(null, $file, $this->maximumBytes), $writeLimit);
+    }
+
+    /** Existing readers keep their nullable-tag contract while sharing the richer single-pass state reader. */
+    private function readSource(ImageTagSource $source): ?array { return $this->readStateSource($source)['tags']; }
+
     /** A single reader accepts only the bounded versioned envelope emitted by this owner. */
-    private function readSource(ImageTagSource $source): ?array
+    private function readStateSource(ImageTagSource $source, ?int $writeLimit = null): array
     {
         try {
             $layout = $this->inspect($source);
@@ -139,7 +150,13 @@ final class ImageTags
                     || !array_is_list($value['tags'])) throw new InvalidArgumentException(self::C['metadata_error']);
                 $tags = $this->normalize($value['tags']);
             }
-            return $tags;
+            $writable = ($layout['writable'] ?? true) === true;
+            if ($writeLimit !== null && $writable) {
+                // Branch: admission uses the same minimal edit plan and both input/output limits as the actual writer.
+                try { $writable = $source->size() <= $writeLimit && $this->editPlan($source->size(), $layout, [])['size'] <= $writeLimit; }
+                catch (InvalidArgumentException) { $writable = false; }
+            }
+            return ['tags' => $tags, 'writable' => $writable];
         } finally { $source->close(); }
     }
 
@@ -147,27 +164,11 @@ final class ImageTags
     public function embed(string $bytes, array $tags): string
     {
         $tags = $this->normalize($tags);
-        $payload = json_encode(['format' => self::C['format'], 'version' => self::C['version'], 'tags' => $tags],
-            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
-        if (strlen($payload) > self::C['maximum_metadata_bytes']) throw new InvalidArgumentException(self::C['metadata_error']);
         $layout = $this->inspect(new ImageTagSource($bytes, null, $this->maximumBytes));
-        if (($layout['writable'] ?? true) !== true) throw new InvalidArgumentException(self::C['format_error']);
-        if (count($layout['owned']) > self::C['one']) throw new InvalidArgumentException(self::C['metadata_error']);
-        $header = self::C['empty'];
-        if ($layout['format'] === 'png') {
-            $chunk = $this->pngChunk('iTXt', self::C['keyword'] . str_repeat("\0", self::C['five']) . $payload);
-        } elseif ($layout['format'] === 'jpeg') {
-            $data = self::C['jpeg_prefix'] . $payload;
-            $chunk = "\xff\xef" . pack(self::C['be_short'], strlen($data) + self::C['two']) . $data;
-        } else {
-            // Branch: a simple WebP receives a native extended header before its private metadata is appended.
-            $header = $layout['extended'] ? self::C['empty'] : $this->webpHeader($layout);
-            $chunk = $this->riffChunk(self::C['webp_chunk'], $payload);
-        }
-        $removed = array_sum(array_column($layout['owned'], 'length'));
-        $outputSize = strlen($bytes) - $removed + strlen($header) + strlen($chunk);
+        $plan = $this->editPlan(strlen($bytes), $layout, $tags);
+        $header = $plan['header']; $chunk = $plan['chunk'];
         // Branch: preflight the exact output before rebuilding large ranges, using the same limit as all readers.
-        if ($outputSize > $this->maximumBytes) throw new InvalidArgumentException(self::C['metadata_error']);
+        if ($plan['size'] > $this->maximumBytes) throw new InvalidArgumentException(self::C['metadata_error']);
         $kept = self::C['empty']; $cursor = self::C['zero'];
         foreach ($layout['owned'] as $record) {
             // Loop: only precisely identified private spans are omitted; unrelated raw ranges retain their exact order.
@@ -190,6 +191,29 @@ final class ImageTags
         if ($layout['format'] === 'webp') $result = substr_replace($result,
             pack(self::C['le_word'], strlen($result) - self::C['chunk_header']), self::C['word'], self::C['word']);
         return $result;
+    }
+
+    /** Admission and writing share one chunk/VP8X/removal size plan; it never reads or decodes image payloads. */
+    private function editPlan(int $inputSize, array $layout, array $tags): array
+    {
+        if (($layout['writable'] ?? true) !== true) throw new InvalidArgumentException(self::C['format_error']);
+        if (count($layout['owned']) > self::C['one']) throw new InvalidArgumentException(self::C['metadata_error']);
+        $payload = json_encode(['format' => self::C['format'], 'version' => self::C['version'], 'tags' => $tags],
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        if (strlen($payload) > self::C['maximum_metadata_bytes']) throw new InvalidArgumentException(self::C['metadata_error']);
+        $header = self::C['empty'];
+        if ($layout['format'] === 'png') {
+            $chunk = $this->pngChunk('iTXt', self::C['keyword'] . str_repeat("\0", self::C['five']) . $payload);
+        } elseif ($layout['format'] === 'jpeg') {
+            $data = self::C['jpeg_prefix'] . $payload;
+            $chunk = "\xff\xef" . pack(self::C['be_short'], strlen($data) + self::C['two']) . $data;
+        } else {
+            // Branch: a simple WebP needs its real native canvas header as well as the new private chunk.
+            $header = $layout['extended'] ? self::C['empty'] : $this->webpHeader($layout);
+            $chunk = $this->riffChunk(self::C['webp_chunk'], $payload);
+        }
+        $removed = array_sum(array_column($layout['owned'], 'length'));
+        return ['header' => $header, 'chunk' => $chunk, 'size' => $inputSize - $removed + strlen($header) + strlen($chunk)];
     }
 
     /** Format dispatch examines only signatures; declared extensions cannot select a different binary parser. */

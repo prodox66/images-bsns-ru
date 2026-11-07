@@ -182,6 +182,10 @@ final class ImageTagsContract
         try {
             $this->check($this->codec->readFile(self::C['scheme'] . '://fixture') === ['file-tag'], 'File reader did not return canonical tags.');
             $this->check(ImageTagCountingStream::$readBytes < self::C['maximum_reader_bytes'], 'File reader allocated the skipped mask/pixel payload.');
+            ImageTagCountingStream::$readBytes = self::C['zero'];
+            $state = $this->codec->fileState(self::C['scheme'] . '://fixture', strlen(ImageTagCountingStream::$bytes));
+            $this->check($state['tags'] === ['file-tag'] && $state['writable'] === true, 'Write admission lost readable tags or rejected a valid clear-sized edit.');
+            $this->check(ImageTagCountingStream::$readBytes < self::C['maximum_reader_bytes'], 'Write admission read the skipped mask/pixel payload.');
         } finally { stream_wrapper_unregister(self::C['scheme']); ImageTagCountingStream::$bytes = self::C['empty']; }
     }
 
