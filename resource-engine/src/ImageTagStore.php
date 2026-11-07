@@ -203,6 +203,8 @@ final class ImageTagTransaction
 /** Shared file-tag states and ADD/REPLACE preparation keep persistence out of both gallery renderers. */
 final class ImageTagStore
 {
+    public const SELECTED_ADD = 'add_selected';
+    private const SELECTED_REVISION_PATTERN = '/^[a-f0-9]{64}$/D';
     private const C = ['empty' => '', 'zero' => 0, 'one' => 1, 'hash' => 'sha256', 'read_mode' => 'rb', 'maximum_edit_bytes' => 20971520,
         'supported_mimes' => ['image/png', 'image/jpeg', 'image/webp'], 'add' => 'add', 'replace' => 'replace',
         'known' => 'embedded', 'legacy' => 'legacy', 'absent' => 'absent', 'unsupported' => 'unsupported', 'error' => 'error',
@@ -258,22 +260,28 @@ final class ImageTagStore
         } catch (Throwable) { return $result; }
     }
 
+    /** Only selected ADD and REPLACE bind their initial source to a revision; ordinary ADD keeps its fresh union. */
+    public static function usesExpectedRevision(string $operation): bool
+    { return in_array($operation, [self::C['replace'], self::SELECTED_ADD], true); }
+
     /** The lock owner supplies only already-resolved source/variant paths and its current legacy entry. */
     public function prepare(string $path, string $mime, array $tags, string $operation, array $legacy,
         ?string $expectedRevision, string $recoveryDirectory, array $variants = [], array $variantProofs = [],
         bool $observeUnchanged = false): array
     {
-        if (!in_array($operation, [self::C['add'], self::C['replace']], true) || !in_array($mime, self::C['supported_mimes'], true)) {
+        if (!in_array($operation, [self::C['add'], self::C['replace'], self::SELECTED_ADD], true)
+            || !in_array($mime, self::C['supported_mimes'], true)
+            || $operation === self::SELECTED_ADD && ($expectedRevision === null || preg_match(self::SELECTED_REVISION_PATTERN, $expectedRevision) !== self::C['one'])) {
             throw new InvalidArgumentException(self::C['failed']);
         }
         $revision = ImageTagTransaction::revision($path);
-        if ($revision === self::C['empty'] || $operation === self::C['replace'] && $expectedRevision !== null && !hash_equals($revision, $expectedRevision)) {
+        if ($revision === self::C['empty'] || self::usesExpectedRevision($operation) && $expectedRevision !== null && !hash_equals($revision, $expectedRevision)) {
             throw new RuntimeException(self::C['changed'], self::C['conflict']);
         }
         $before = $this->bytes($path); $current = $this->reader->read($before);
         $requested = $this->writer->normalize($tags);
         // Branch: ADD uses the freshly read complete set; REPLACE and explicit clear do not inherit any fallback.
-        $wanted = $operation === self::C['add'] ? $this->writer->normalize(array_values(array_unique(array_merge(
+        $wanted = $operation !== self::C['replace'] ? $this->writer->normalize(array_values(array_unique(array_merge(
             $current ?? $this->legacy($legacy), $requested), SORT_STRING))) : $requested;
         $transaction = new ImageTagTransaction($recoveryDirectory, $this->maximumBytes);
         try {

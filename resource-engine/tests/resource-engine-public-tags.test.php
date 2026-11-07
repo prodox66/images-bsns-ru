@@ -23,6 +23,7 @@ namespace {
     use Bzn\ResourceEngine\EngineConfiguration;
     use Bzn\ResourceEngine\ImageProcessor;
     use Bzn\ResourceEngine\ImageTags;
+    use Bzn\ResourceEngine\ImageTagStore;
     use Bzn\ResourceEngine\ImageTagTransaction;
     use Bzn\ResourceEngine\ResourceCollection;
     use Bzn\ResourceEngine\ResourceEngine;
@@ -39,7 +40,7 @@ namespace {
             'type' => 'images', 'name' => 'selected.png', 'other' => 'unrelated.png', 'thumb' => 'thumbnail', 'opt' => 'optimized',
             'before' => ['0', 'old'], 'after' => ['0', 'new'], 'external' => ['0', 'ext'], 'replace' => 'replace', 'add' => 'add',
             'conflict' => 409, 'tick' => 1, 'second_digest' => 2, 'zero' => 0,
-            'safe_fraction' => 0.5, 'microseconds' => 1000000, 'clock_margin' => 20000];
+            'safe_fraction' => 0.5, 'microseconds' => 1000000, 'clock_margin' => 20000, 'white' => 255];
         private string $root;
         private string $source;
         private string $other;
@@ -110,6 +111,34 @@ namespace {
                 $this->check($code === null || $error->getCode() === $code, 'Unexpected conflict code.'); return;
             }
             throw new \RuntimeException('An unsafe alias edit passed.');
+        }
+
+        /** The displayed opaque id survives a same-name replacement; only the exact selected revision permits a bulk union. */
+        private function selectedAdd(): void
+        {
+            $name = 'selected-guard.png'; $path = $this->collection->sourceDirectory() . '/' . $name;
+            $id = $this->collection->resourceId($name);
+            file_put_contents($path, $this->codec->embed($this->png(), self::C['before']));
+            $selected = ImageTagTransaction::revision($path); $mtime = filemtime($path);
+            $stage = $this->root . '/guard-replacement.tmp';
+            $replacement = imagecreatetruecolor(self::C['width'], self::C['height']);
+            $white = imagecolorallocate($replacement, self::C['white'], self::C['white'], self::C['white']);
+            imagefill($replacement, self::C['zero'], self::C['zero'], $white);
+            ob_start(); imagepng($replacement); $bytes = (string) ob_get_clean(); imagedestroy($replacement);
+            $fresh = $this->codec->embed($bytes, ['replacement']);
+            file_put_contents($stage, $fresh); touch($stage, $mtime); rename($stage, $path);
+            $guard = static fn () => [];
+            $edit = fn (string $operation, string $revision, array $tags) => $this->engine->updateTagsWithPublicAliases(
+                self::C['type'], $id, $tags, $operation, $revision, $guard);
+            $newRevision = ImageTagTransaction::revision($path);
+            $this->check($selected !== $newRevision && filemtime($path) === $mtime, 'Fixture did not keep the id/mtime and change the source identity.');
+            $this->rejects(fn () => $edit(ImageTagStore::SELECTED_ADD, $selected, ['wrong']), self::C['conflict']);
+            $this->check(file_get_contents($path) === $fresh, 'Rejected selected ADD changed replacement bytes.');
+            $edit(ImageTagStore::SELECTED_ADD, $newRevision, ['fresh']);
+            $this->check($this->codec->readFile($path) === ['fresh', 'replacement'], 'Selected ADD replaced the current tags.');
+            $this->rejects(fn () => $edit(ImageTagStore::SELECTED_ADD, $newRevision, ['stale']), self::C['conflict']);
+            $edit(self::C['add'], $selected, ['legacy-add']);
+            $this->check($this->codec->readFile($path) === ['fresh', 'legacy-add', 'replacement'], 'The ordinary fresh ADD changed semantics.');
         }
 
         private function files(): array
@@ -288,6 +317,7 @@ namespace {
         {
             try {
                 $this->success(); $this->admission(); $this->recovery(); $this->swaps(); $this->sameStatNoOp(); $this->sameStatAtAdmission();
+                $this->selectedAdd();
                 echo 'PASS public alias tag transaction: ' . $this->checks . ' actual assertions.' . PHP_EOL;
             } finally {
                 // Cleanup: only this exact generated fixture tree and no links followed.

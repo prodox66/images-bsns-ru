@@ -238,8 +238,8 @@ final class ResourceEngine
     private function requestTagUpdate(string $type, string $resourceId, array $tags, string $operation,
         ?string $expectedRevision, ?callable $publicAliases = null): array
     {
-        if (!in_array($operation, [self::TAG['add'], self::TAG['replace']], true)
-            || $operation === self::TAG['replace'] && ($expectedRevision === null || $expectedRevision === self::TAG['empty'])) {
+        if (!in_array($operation, [self::TAG['add'], self::TAG['replace'], ImageTagStore::SELECTED_ADD], true)
+            || ImageTagStore::usesExpectedRevision($operation) && ($expectedRevision === null || $expectedRevision === self::TAG['empty'])) {
             throw new InvalidArgumentException(self::TAG['failed']);
         }
         return $this->changeTags($type, $resourceId, $tags, $operation, $expectedRevision, false, $publicAliases);
@@ -283,7 +283,7 @@ final class ResourceEngine
         $legacy = $this->tagEntry($metadata, $id);
         if ($legacy === null) throw new RuntimeException(self::TAG['failed']);
         $state = $this->tagState($collection, $name, $legacy);
-        if ($expectedRevision !== null && $operation === self::TAG['replace'] && !hash_equals($state['tag_revision'], $expectedRevision)) {
+        if ($expectedRevision !== null && ImageTagStore::usesExpectedRevision($operation) && !hash_equals($state['tag_revision'], $expectedRevision)) {
             // Branch: a removed, replaced or newly unreadable source cannot satisfy a displayed revision.
             throw new RuntimeException('Image changed during metadata editing.', self::TAG_CONFLICT);
         }
