@@ -421,7 +421,7 @@ final class ResourceEngine
         $expected = $this->archiveSelection($selection);
         $collection = $this->configuration->collection($type);
         return $collection->withMutationLock(function () use ($collection, $expected, $publicAliases): array {
-            $archive = new ResourceSelectedArchive($collection);
+            $archive = new ResourceSelectedArchive($collection, $this->tagStore());
             $sidecar = $this->tagMetadata($collection); $metadata = $sidecar['entries'];
             if ($metadata === null) throw new RuntimeException(self::ARCHIVE['failed']);
             $items = []; $recovery = [];
@@ -438,7 +438,7 @@ final class ResourceEngine
             $transaction = new ImageTagTransaction($collection->runtimeDirectory() . DIRECTORY_SEPARATOR . self::TAG['recovery']);
             try {
                 $archive->move($recovery);
-                $this->publishTagUpdate($collection, $transaction, $metadata, $sidecar['bytes'], [], $archive->removedPaths());
+                $this->publishTagUpdate($collection, $transaction, $metadata, $sidecar['bytes'], $archive->archiveProofs(), $archive->removedPaths());
             } catch (Throwable $error) {
                 // Recovery: the catalog transaction has its own rollback; restore only the still-owned archived files here.
                 $archive->rollback();
@@ -477,11 +477,12 @@ final class ResourceEngine
         foreach (self::RENAME_DERIVATIVE_VARIANTS as $variant) {
             // Loop: an older runtime cache belongs to the same ID even when it was never published as a public alias.
             $path = $collection->derivedPath($id, $variant); $runtimePaths[$path] = true;
-            $archive->expect($path, $proof['files'][$path]['revision'] ?? null, !isset($proof['files'][$path]));
+            $entry = $proof['files'][$path] ?? null;
+            $archive->expect($path, $entry['revision'] ?? null, $entry === null, $entry['digest'] ?? null);
         }
         foreach ($proof['files'] as $path => $entry) {
             // Loop: the runtime counterpart has already been planned; add only the verified public path.
-            if (!isset($runtimePaths[$path])) $archive->expect($path, $entry['revision']);
+            if (!isset($runtimePaths[$path])) $archive->expect($path, $entry['revision'], false, $entry['digest']);
         }
         foreach ($proof['missing'] as $path) $archive->expectMissing($path);
     }

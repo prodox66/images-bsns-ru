@@ -1,6 +1,24 @@
 <?php
 declare(strict_types=1);
 
+namespace Bzn\ResourceEngine {
+    /** Actual digest reads expose narrow fixture seams for a same-stat writer at two transaction boundaries. */
+    function hash_update_stream(\HashContext $context, $stream, int $length = -1): int
+    {
+        $read = \hash_update_stream($context, $stream, $length);
+        if (isset($GLOBALS['bznArchiveAfterRead'])) ($GLOBALS['bznArchiveAfterRead'])(stream_get_meta_data($stream)['uri']);
+        return $read;
+    }
+
+    function hash_file(string $algorithm, string $path, bool $binary = false): string|false
+    {
+        $digest = \hash_file($algorithm, $path, $binary);
+        if (isset($GLOBALS['bznArchiveAfterHash'])) ($GLOBALS['bznArchiveAfterHash'])($path);
+        return $digest;
+    }
+}
+
+namespace {
 use Bzn\ResourceEngine\EngineConfiguration;
 use Bzn\ResourceEngine\ImageProcessor;
 use Bzn\ResourceEngine\ImageTagTransaction;
@@ -17,7 +35,8 @@ final class SelectedResourceArchiveContract
 {
     private const C = ['prefix' => 'bzn-selected-archive-', 'random' => 8, 'mode' => 0700, 'width' => 3, 'height' => 2,
         'type' => 'resources', 'first' => 'First.png', 'second' => 'Second.png', 'neighbor' => 'Neighbor.png',
-        'thumb' => 'thumbnail', 'opt' => 'optimized', 'conflict' => 409, 'zero' => 0, 'one' => 1, 'white' => 255];
+        'thumb' => 'thumbnail', 'opt' => 'optimized', 'conflict' => 409, 'zero' => 0, 'one' => 1, 'white' => 255,
+        'fraction' => 0.45, 'us_per_second' => 1000000, 'clock_margin' => 20000];
     private string $root;
     private ResourceCollection $collection;
     private ResourceEngine $engine;
@@ -105,6 +124,50 @@ final class SelectedResourceArchiveContract
         unlink($script); file_put_contents($script, $old);
     }
 
+    /** Drift in a detached alias is visible even with the same inode, size and timestamp. */
+    private function copyDrift(bool $late): void
+    {
+        $path = $this->aliases[self::C['thumb']]; $metadata = $this->collection->metadataFile();
+        $all = [...$this->paths(), $metadata, $this->collection->catalogFile(), $this->collection->catalogScriptFile()];
+        $before = array_combine($all, array_map('file_get_contents', $all));
+        $external = $before[$path]; $last = strlen($external) - self::C['one'];
+        $external[$last] = $external[$last] === 'A' ? 'B' : 'A';
+        $now = microtime(true); $fraction = $now - floor($now);
+        if ($fraction > self::C['fraction']) {
+            // Branch: keep the tiny physical fixture operation inside the next stat second.
+            usleep((int) ((self::C['one'] - $fraction) * self::C['us_per_second']) + self::C['clock_margin']);
+        }
+        $mtime = filemtime($path); touch($path, $mtime);
+        $matched = false; $mutated = false; $status = null;
+        $mutate = static function (string $target) use ($external, &$matched, &$mutated): void {
+            $mutated = true;
+            $expected = ImageTagTransaction::revision($target); $time = filemtime($target);
+            file_put_contents($target, $external); touch($target, $time);
+            $matched = $expected === ImageTagTransaction::revision($target);
+        };
+        if ($late) {
+            $GLOBALS['bznArchiveAfterHash'] = function (string $candidate) use ($path, $metadata, $mutate, &$mutated): void {
+                if ($candidate !== $metadata || $mutated) return;
+                $directory = $this->savedDirectories()[self::C['zero']] ?? null;
+                if ($directory === null) return;
+                $journal = json_decode(file_get_contents($directory . '/restore.json'), true, flags: JSON_THROW_ON_ERROR);
+                $mutate($directory . '/' . $journal['locations'][$path]);
+            };
+        } else {
+            $GLOBALS['bznArchiveAfterRead'] = static function (string $candidate) use ($path, $mutate, &$mutated): void {
+                if ($candidate === $path && !$mutated) $mutate($path);
+            };
+        }
+        try { $this->archive($this->pair()); }
+        catch (RuntimeException $error) { $status = $error->getCode(); }
+        finally { unset($GLOBALS['bznArchiveAfterRead'], $GLOBALS['bznArchiveAfterHash']); }
+        $expected = $before; $expected[$path] = $external;
+        $after = array_combine($all, array_map('file_get_contents', $all));
+        $this->check($matched && $status === self::C['conflict'] && $after === $expected && !$this->savedDirectories(),
+            'A same-stat external copy drift was committed, overwritten, or left the catalogs changed.');
+        file_put_contents($path, $before[$path]); touch($path, $mtime);
+    }
+
     /** Successful archiving retains exact bytes, one recovery manifest and unrelated data. */
     private function success(): void
     {
@@ -132,7 +195,7 @@ final class SelectedResourceArchiveContract
     public function run(): void
     {
         try {
-            $this->stale(); $this->recovery(); $this->success();
+            $this->stale(); $this->recovery(); $this->copyDrift(false); $this->copyDrift(true); $this->success();
             echo 'PASS protected common archive: ' . $this->checks . ' actual assertions.' . PHP_EOL;
         } finally {
             // Cleanup: only the exact generated fixture and no symlink traversal.
@@ -148,3 +211,4 @@ final class SelectedResourceArchiveContract
 }
 
 (new SelectedResourceArchiveContract())->run();
+}

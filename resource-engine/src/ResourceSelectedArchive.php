@@ -22,10 +22,10 @@ final class ResourceSelectedArchive
     private ?string $directory = null;
 
     /** The collection owns the trusted runtime and recovery roots. */
-    public function __construct(private readonly ResourceCollection $collection) {}
+    public function __construct(private readonly ResourceCollection $collection, private readonly ImageTagStore $tagStore) {}
 
     /** Records a canonical selected file without mutating the archive or the live directory. */
-    public function expect(string $path, ?string $revision = null, bool $optional = false): void
+    public function expect(string $path, ?string $revision = null, bool $optional = false, ?string $digest = null): void
     {
         if (isset($this->files[$path]) || isset($this->missing[$path])) throw $this->conflict();
         $parent = dirname($path); $canonical = @realpath($parent);
@@ -37,10 +37,11 @@ final class ResourceSelectedArchive
             $this->missing[$path] = true; return;
         }
         if ($canonical !== $parent || @realpath($path) !== $path || ($revision !== null
-            && (!hash_equals($revision, ImageTagTransaction::revision($path)) || $this->fileState($path) !== $state))) {
+            && (!hash_equals($revision, ImageTagTransaction::revision($path)) || $this->fileState($path) !== $state))
+            || !$this->matchesDigest($path, $state, $digest)) {
             throw $this->conflict();
         }
-        $this->files[$path] = ['before' => $state, 'slot' => self::C['slot'] . count($this->files)];
+        $this->files[$path] = ['before' => $state, 'digest' => $digest, 'slot' => self::C['slot'] . count($this->files)];
     }
 
     /** Missing public aliases cannot be replaced with an unverified file between proof and planning. */
@@ -76,6 +77,21 @@ final class ResourceSelectedArchive
     /** A matching selection must stay absent through catalog publication. */
     public function removedPaths(): array { return array_keys($this->files + $this->missing); }
 
+    /** Detached public copies keep their content proof through the catalog's final publication check. */
+    public function archiveProofs(): array
+    {
+        $proofs = [];
+        foreach ($this->moved as $path => $record) {
+            // Loop: identical inode pairs need no digest; detached copies retain the bytes approved before the move.
+            $digest = $this->files[$path]['digest'];
+            if ($digest === null) continue;
+            $backup = $record['backup']; $state = $this->fileState($backup);
+            if ($state === null || @realpath($backup) !== $backup || $this->identity($state) !== $record['identity']) throw $this->conflict();
+            $proofs[$backup] = $this->digestProof($backup, $state, $digest);
+        }
+        return $proofs;
+    }
+
     /** Recovery never overwrites a file that arrived independently after the move. */
     public function rollback(): void
     {
@@ -102,7 +118,7 @@ final class ResourceSelectedArchive
         $expected = $this->inodeStates[$inode] ?? $before;
         $backup = $this->directory . DIRECTORY_SEPARATOR . $entry['slot'];
         if ($this->fileState($path) !== $expected || @realpath($path) !== $path || @realpath($this->directory) !== $this->directory
-            || !$this->absent($backup)) throw $this->conflict();
+            || !$this->absent($backup) || !$this->matchesDigest($path, $expected, $entry['digest'])) throw $this->conflict();
         if (!@rename($path, $backup)) throw new RuntimeException(self::C['failed']);
         $observed = $this->fileState($backup);
         // Branch: remember the actual moved entry for conservative recovery, even if an external writer raced this move.
@@ -110,6 +126,17 @@ final class ResourceSelectedArchive
         if ($observed === null || $this->identity($observed) !== $this->identity($before)) throw $this->conflict();
         $this->inodeStates[$inode] = $observed;
     }
+
+    /** Uses the existing bounded reader to prove a detached file, followed by the exact observed inode state. */
+    private function matchesDigest(string $path, array $state, ?string $digest): bool
+    {
+        return $digest === null || ($this->tagStore->unchangedMatches($path, $this->digestProof($path, $state, $digest))
+            && $this->fileState($path) === $state);
+    }
+
+    /** Catalog checks and move admission share the same content-proof format. */
+    private function digestProof(string $path, array $state, string $digest): array
+    { return ['revision' => ImageTagTransaction::revision($path), 'size' => $state['size'], 'digest' => $digest]; }
 
     /** Exact paths and legacy sidecar values are private recovery data, never response fields. */
     private function writeJournal(array $records): void
