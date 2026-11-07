@@ -9,6 +9,7 @@ use RuntimeException;
 use Throwable;
 
 require_once __DIR__ . '/ImageTagStore.php';
+require_once __DIR__ . '/ResourceSelectedArchive.php';
 
 /** Owns catalog, metadata, upload and derivative operations behind one resource contract. */
 final class ResourceEngine
@@ -21,6 +22,8 @@ final class ResourceEngine
     private const TAG_ERROR = ['tags' => null, 'tag_state' => 'error', 'tag_revision' => '', 'tag_editable' => false];
     private const DELIVERY = ['original' => 'original', 'optimized' => 'optimized', 'resource' => 'resource', 'empty' => ''];
     private const RENAME_DERIVATIVE_VARIANTS = ['thumbnail', 'optimized'];
+    private const ARCHIVE = ['maximum' => 30, 'id' => '/^[a-f0-9]{32}$/D', 'revision' => '/^[a-f0-9]{64}$/D',
+        'fields' => ['id', 'revision'], 'invalid' => 'Invalid image archive selection.', 'failed' => 'Image archive is unavailable.'];
     private const REPLACEMENT = ['one' => 1, 'zero' => 0, 'revision_step' => 1,
         'random_bytes' => 8, 'prefix' => '.replace-', 'separator' => '-'];
     private EngineConfiguration $configuration;
@@ -410,6 +413,77 @@ final class ResourceEngine
             clearstatcache(true, $path);
             if (file_exists($path) || is_link($path)) throw new RuntimeException(self::TAG['failed'], self::TAG_CONFLICT);
         }
+    }
+
+    /** Archives one bounded, revision-bound selection and publishes its collection once. */
+    public function archiveSelectedWithPublicAliases(string $type, array $selection, callable $publicAliases): array
+    {
+        $expected = $this->archiveSelection($selection);
+        $collection = $this->configuration->collection($type);
+        return $collection->withMutationLock(function () use ($collection, $expected, $publicAliases): array {
+            $archive = new ResourceSelectedArchive($collection);
+            $sidecar = $this->tagMetadata($collection); $metadata = $sidecar['entries'];
+            if ($metadata === null) throw new RuntimeException(self::ARCHIVE['failed']);
+            $items = []; $recovery = [];
+            foreach ($expected as $id => $revision) {
+                // Loop: resolve and prove every selected original before the first file can leave its live path.
+                try { $item = $this->currentAliasTagRecord($collection, $id); }
+                catch (InvalidArgumentException) { throw new RuntimeException(self::ARCHIVE['failed'], self::TAG_CONFLICT); }
+                $name = $item['name']; $source = $this->sourceFile($collection, $name);
+                $archive->expect($source, $revision);
+                $this->planArchiveVariants($archive, $collection, $source, $item, $publicAliases);
+                $items[] = $item; $recovery[] = $item + ['metadata' => $metadata[$id] ?? null];
+                unset($metadata[$id]);
+            }
+            $transaction = new ImageTagTransaction($collection->runtimeDirectory() . DIRECTORY_SEPARATOR . self::TAG['recovery']);
+            try {
+                $archive->move($recovery);
+                $this->publishTagUpdate($collection, $transaction, $metadata, $sidecar['bytes'], [], $archive->removedPaths());
+            } catch (Throwable $error) {
+                // Recovery: the catalog transaction has its own rollback; restore only the still-owned archived files here.
+                $archive->rollback();
+                throw $error;
+            }
+            return ['items' => $items];
+        });
+    }
+
+    /** Accepts only a bounded list of opaque IDs and their displayed source revisions. */
+    private function archiveSelection(array $selection): array
+    {
+        $policy = self::ARCHIVE;
+        if (!$selection || !array_is_list($selection) || count($selection) > $policy['maximum']) throw new InvalidArgumentException($policy['invalid']);
+        $expected = [];
+        foreach ($selection as $record) {
+            // Loop: duplicate IDs and unknown fields never select a second source or a physical path.
+            if (!is_array($record)) throw new InvalidArgumentException($policy['invalid']);
+            $id = $record['id'] ?? null; $revision = $record['revision'] ?? null;
+            if (array_diff_key($record, array_flip($policy['fields'])) || !is_string($id)
+                || !is_string($revision) || !preg_match($policy['id'], $id) || !preg_match($policy['revision'], $revision) || isset($expected[$id])) {
+                throw new InvalidArgumentException($policy['invalid']);
+            }
+            $expected[$id] = $revision;
+        }
+        return $expected;
+    }
+
+    /** Only this selected record's runtime variants and proven host aliases join the archive. */
+    private function planArchiveVariants(ResourceSelectedArchive $archive, ResourceCollection $collection,
+        string $source, array $item, callable $publicAliases): void
+    {
+        $id = $item['id']; $variants = $this->currentTagVariants($collection, $source, $id);
+        $proof = $this->publicAliasProof($collection, $item['name'], $variants, $publicAliases);
+        $runtimePaths = [];
+        foreach (self::RENAME_DERIVATIVE_VARIANTS as $variant) {
+            // Loop: an older runtime cache belongs to the same ID even when it was never published as a public alias.
+            $path = $collection->derivedPath($id, $variant); $runtimePaths[$path] = true;
+            $archive->expect($path, $proof['files'][$path]['revision'] ?? null, !isset($proof['files'][$path]));
+        }
+        foreach ($proof['files'] as $path => $entry) {
+            // Loop: the runtime counterpart has already been planned; add only the verified public path.
+            if (!isset($runtimePaths[$path])) $archive->expect($path, $entry['revision']);
+        }
+        foreach ($proof['missing'] as $path) $archive->expectMissing($path);
     }
 
     /** Creates a non-destructive optimized WebP for one opaque resource id. */
